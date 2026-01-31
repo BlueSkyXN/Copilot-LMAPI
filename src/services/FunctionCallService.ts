@@ -523,49 +523,64 @@ export class FunctionCallService {
      * 🔒 严格的路径验证和规范化
      */
     private validateAndNormalizePath(filePath: string): string {
+        // 0. Unicode normalization to prevent Unicode-based attacks
+        filePath = filePath.normalize('NFC');
+        
         // 1. 基本格式检查
         if (filePath.length > 1000) {
             throw new Error('路径过长');
         }
         
-        // 2. 检查危险字符和模式
+        // Check for null bytes in the string (before pattern matching)
+        if (filePath.includes('\0')) {
+            throw new Error('路径包含空字节');
+        }
+        
+        // 2. 首先规范化路径以处理各种边缘情况
+        const prePath = path.normalize(filePath);
+        
+        // 3. 检查危险字符和模式 (on normalized path)
         const dangerousPatterns = [
             /\.\./,              // 父目录遍历
             /~/,                 // home目录引用
-            /\0/,                // null字节注入
             /%2e/i,              // URL编码的 . (任何形式)
             /%2f/i,              // URL编码的 /
             /%5c/i,              // URL编码的 \
-            /\\/,                // Windows路径分隔符
+            /\\/,                // Windows路径分隔符 (Unix only)
             /^\/[^\/]/,          // 绝对路径
             /^[a-zA-Z]:/,        // Windows驱动器路径
             /%[0-9a-f]{2}/i,     // 任何URL编码都不允许
+            /\.\//,              // Current directory reference (./)
+            /\/\./,              // Embedded current directory (/.)
         ];
         
         for (const pattern of dangerousPatterns) {
-            if (pattern.test(filePath)) {
+            if (pattern.test(prePath)) {
                 throw new Error(`路径包含危险字符或模式: ${filePath}`);
             }
         }
         
-        // 3. 只允许相对路径且在当前目录下
-        if (path.isAbsolute(filePath)) {
-            throw new Error('不允许绝对路径');
-        }
-        
-        // 4. 规范化路径
-        const normalizedPath = path.resolve(filePath);
-        
-        // 5. 验证规范化后的路径
+        // 4. 解析为绝对路径以验证范围
         const workspaceRoot = process.cwd();
-        if (!normalizedPath.startsWith(workspaceRoot)) {
+        const normalizedPath = path.resolve(workspaceRoot, prePath);
+        
+        // 5. 验证规范化后的路径在工作区内
+        if (!normalizedPath.startsWith(workspaceRoot + path.sep) && normalizedPath !== workspaceRoot) {
             throw new Error('路径超出允许范围');
         }
         
         // 6. 额外安全检查：确保没有符号链接攻击
         const relativePath = path.relative(workspaceRoot, normalizedPath);
-        if (relativePath.startsWith('..')) {
+        if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
             throw new Error('规范化后的路径无效');
+        }
+        
+        // 7. 防止路径段为空或只有点
+        const segments = relativePath.split(path.sep);
+        for (const segment of segments) {
+            if (segment === '' || segment === '.' || segment === '..') {
+                throw new Error('路径段无效');
+            }
         }
         
         return normalizedPath;
