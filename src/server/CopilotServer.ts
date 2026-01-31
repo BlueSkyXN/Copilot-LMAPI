@@ -28,7 +28,12 @@ export class CopilotServer {
     private modelDiscovery: ModelDiscoveryService;
     private config: ServerConfig;
     private state: ServerState;
-    private activeRequests: Map<string, { req: http.IncomingMessage; res: http.ServerResponse; startTime: Date }>;
+    private activeRequests: Map<string, { 
+        req: http.IncomingMessage; 
+        res: http.ServerResponse; 
+        startTime: Date;
+        cancellationTokenSource?: vscode.CancellationTokenSource;
+    }>;
     private isShuttingDown: boolean = false;
     
     constructor() {
@@ -162,13 +167,31 @@ export class CopilotServer {
             this.handleRequestTimeout(requestId, res);
         });
         
+        // Handle client disconnection
+        req.on('close', () => {
+            const activeRequest = this.activeRequests.get(requestId);
+            if (activeRequest?.cancellationTokenSource && !res.writableEnded) {
+                logger.warn('Client disconnected, cancelling request', {}, requestId);
+                activeRequest.cancellationTokenSource.cancel();
+                activeRequest.cancellationTokenSource.dispose();
+            }
+        });
+        
+        req.on('aborted', () => {
+            const activeRequest = this.activeRequests.get(requestId);
+            if (activeRequest?.cancellationTokenSource) {
+                logger.warn('Request aborted, cancelling request', {}, requestId);
+                activeRequest.cancellationTokenSource.cancel();
+                activeRequest.cancellationTokenSource.dispose();
+            }
+        });
+        
         try {
             // 增加请求计数器
             this.state.requestCount++;
             
-            // 解析URL，为缺少的host头提供退回
-            const hostHeader = req.headers.host || `${this.config.host}:${this.config.port}`;
-            const url = new URL(req.url || '/', `http://${hostHeader}`);
+            // Always use configured host/port, never trust client Host header
+            const url = new URL(req.url || '/', `http://${this.config.host}:${this.config.port}`);
             const method = req.method || 'GET';
             
             // 记录增强请求
@@ -220,58 +243,72 @@ export class CopilotServer {
         res: http.ServerResponse,
         requestId: string
     ): Promise<void> {
-        switch (pathname) {
-            case API_ENDPOINTS.CHAT_COMPLETIONS:
-                if (method === 'POST') {
-                    await this.requestHandler.handleChatCompletions(req, res, requestId);
-                } else {
-                    this.sendError(res, HTTP_STATUS.METHOD_NOT_ALLOWED, 'Method not allowed', requestId);
-                }
-                break;
-                
-            case API_ENDPOINTS.MODELS:
-                if (method === 'GET') {
-                    await this.requestHandler.handleModels(req, res, requestId);
-                } else {
-                    this.sendError(res, HTTP_STATUS.METHOD_NOT_ALLOWED, 'Method not allowed', requestId);
-                }
-                break;
-                
-            case API_ENDPOINTS.HEALTH:
-                if (method === 'GET') {
-                    await this.requestHandler.handleHealth(req, res, requestId, this.state);
-                } else {
-                    this.sendError(res, HTTP_STATUS.METHOD_NOT_ALLOWED, 'Method not allowed', requestId);
-                }
-                break;
-                
-            case API_ENDPOINTS.STATUS:
-                if (method === 'GET') {
-                    await this.requestHandler.handleStatus(req, res, requestId, this.state);
-                } else {
-                    this.sendError(res, HTTP_STATUS.METHOD_NOT_ALLOWED, 'Method not allowed', requestId);
-                }
-                break;
-                
-            // 🚀 增强端点
-            case '/v1/models/refresh':
-                if (method === 'POST') {
-                    await this.handleModelRefresh(req, res, requestId);
-                } else {
-                    this.sendError(res, HTTP_STATUS.METHOD_NOT_ALLOWED, 'Method not allowed', requestId);
-                }
-                break;
-                
-            case '/v1/capabilities':
-                if (method === 'GET') {
-                    await this.handleCapabilities(req, res, requestId);
-                } else {
-                    this.sendError(res, HTTP_STATUS.METHOD_NOT_ALLOWED, 'Method not allowed', requestId);
-                }
-                break;
-                
-            default:
-                this.sendError(res, HTTP_STATUS.NOT_FOUND, 'Endpoint not found', requestId);
+        // Create cancellation token source for this request
+        const cancellationTokenSource = new vscode.CancellationTokenSource();
+        const activeRequest = this.activeRequests.get(requestId);
+        if (activeRequest) {
+            activeRequest.cancellationTokenSource = cancellationTokenSource;
+        }
+        
+        try {
+            switch (pathname) {
+                case API_ENDPOINTS.CHAT_COMPLETIONS:
+                    if (method === 'POST') {
+                        await this.requestHandler.handleChatCompletions(req, res, requestId, cancellationTokenSource);
+                    } else {
+                        this.sendError(res, HTTP_STATUS.METHOD_NOT_ALLOWED, 'Method not allowed', requestId);
+                    }
+                    break;
+                    
+                case API_ENDPOINTS.MODELS:
+                    if (method === 'GET') {
+                        await this.requestHandler.handleModels(req, res, requestId);
+                    } else {
+                        this.sendError(res, HTTP_STATUS.METHOD_NOT_ALLOWED, 'Method not allowed', requestId);
+                    }
+                    break;
+                    
+                case API_ENDPOINTS.HEALTH:
+                    if (method === 'GET') {
+                        await this.requestHandler.handleHealth(req, res, requestId, this.state);
+                    } else {
+                        this.sendError(res, HTTP_STATUS.METHOD_NOT_ALLOWED, 'Method not allowed', requestId);
+                    }
+                    break;
+                    
+                case API_ENDPOINTS.STATUS:
+                    if (method === 'GET') {
+                        await this.requestHandler.handleStatus(req, res, requestId, this.state);
+                    } else {
+                        this.sendError(res, HTTP_STATUS.METHOD_NOT_ALLOWED, 'Method not allowed', requestId);
+                    }
+                    break;
+                    
+                // 🚀 增强端点
+                case '/v1/models/refresh':
+                    if (method === 'POST') {
+                        await this.handleModelRefresh(req, res, requestId);
+                    } else {
+                        this.sendError(res, HTTP_STATUS.METHOD_NOT_ALLOWED, 'Method not allowed', requestId);
+                    }
+                    break;
+                    
+                case '/v1/capabilities':
+                    if (method === 'GET') {
+                        await this.handleCapabilities(req, res, requestId);
+                    } else {
+                        this.sendError(res, HTTP_STATUS.METHOD_NOT_ALLOWED, 'Method not allowed', requestId);
+                    }
+                    break;
+                    
+                default:
+                    this.sendError(res, HTTP_STATUS.NOT_FOUND, 'Endpoint not found', requestId);
+            }
+        } finally {
+            // Always dispose cancellation token source
+            if (!cancellationTokenSource.token.isCancellationRequested) {
+                cancellationTokenSource.dispose();
+            }
         }
     }
     
@@ -409,6 +446,13 @@ export class CopilotServer {
     private handleRequestTimeout(requestId: string, res: http.ServerResponse): void {
         logger.warn('Enhanced request timeout', {}, requestId);
         
+        // Cancel the ongoing VS Code API request if it exists
+        const activeRequest = this.activeRequests.get(requestId);
+        if (activeRequest?.cancellationTokenSource) {
+            activeRequest.cancellationTokenSource.cancel();
+            activeRequest.cancellationTokenSource.dispose();
+        }
+        
         if (!res.headersSent) {
             this.sendError(res, HTTP_STATUS.REQUEST_TIMEOUT, 'Request timeout', requestId);
         }
@@ -455,29 +499,43 @@ export class CopilotServer {
             return;
         }
         
-        this.isShuttingDown = true;
-        
         return new Promise((resolve) => {
-            // 首先关闭所有活动请求
+            let resolved = false;
+            
+            const doResolve = () => {
+                if (!resolved) {
+                    resolved = true;
+                    this.state.isRunning = false;
+                    this.state.port = undefined;
+                    this.state.host = undefined;
+                    this.state.startTime = undefined;
+                    this.isShuttingDown = false;
+                    
+                    logger.logServerEvent('🚀 Enhanced server stopped');
+                    vscode.window.showInformationMessage('🚀 Enhanced ' + NOTIFICATIONS.SERVER_STOPPED);
+                    
+                    resolve();
+                }
+            };
+            
+            // Stop accepting new connections immediately
+            this.isShuttingDown = true;
+            
+            // Close all active requests
             this.closeActiveRequests();
             
+            // Close the server
             this.server!.close(() => {
-                this.state.isRunning = false;
-                this.state.port = undefined;
-                this.state.host = undefined;
-                this.state.startTime = undefined;
-                this.isShuttingDown = false;
-                
-                logger.logServerEvent('🚀 Enhanced server stopped');
-                vscode.window.showInformationMessage('🚀 Enhanced ' + NOTIFICATIONS.SERVER_STOPPED);
-                
-                resolve();
+                doResolve();
             });
             
-            // 超时后强制关闭
+            // Force close after timeout
             setTimeout(() => {
-                this.server?.closeAllConnections?.();
-                resolve();
+                if (!resolved) {
+                    logger.warn('Server shutdown timeout, forcing close');
+                    this.server?.closeAllConnections?.();
+                    doResolve();
+                }
             }, 5000);
         });
     }

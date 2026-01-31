@@ -23,6 +23,9 @@ export class ModelDiscoveryService {
     private config: ModelDiscoveryConfig;
     private refreshTimer?: NodeJS.Timeout;
     private healthCheckTimer?: NodeJS.Timeout;
+    private consecutiveFailures: number = 0;
+    private maxConsecutiveFailures: number = 5;
+    private isCircuitBreakerOpen: boolean = false;
     
     public readonly onModelEvent: vscode.Event<ModelEvent>;
     
@@ -59,6 +62,12 @@ export class ModelDiscoveryService {
      * 🔍 发现所有可用模型（无限制！）
      */
     public async discoverAllModels(): Promise<ModelCapabilities[]> {
+        // Circuit breaker: skip if too many consecutive failures
+        if (this.isCircuitBreakerOpen) {
+            logger.warn('⚠️ Circuit breaker open, skipping model discovery');
+            return Array.from(this.modelCache.values());
+        }
+        
         logger.info('🚀 Starting dynamic model discovery...');
         
         try {
@@ -97,11 +106,30 @@ export class ModelDiscoveryService {
             // 更新模型池
             await this.updateModelPool(discoveredModels);
             
+            // Reset failure count on success
+            this.consecutiveFailures = 0;
+            this.isCircuitBreakerOpen = false;
+            
             logger.info(`🎉 Discovery complete! Found ${discoveredModels.length} usable models`);
             return discoveredModels;
             
         } catch (error) {
-            logger.error('❌ Model discovery failed:', error as Error);
+            this.consecutiveFailures++;
+            logger.error(`❌ Model discovery failed (${this.consecutiveFailures}/${this.maxConsecutiveFailures}):`, error as Error);
+            
+            // Open circuit breaker if too many failures
+            if (this.consecutiveFailures >= this.maxConsecutiveFailures) {
+                this.isCircuitBreakerOpen = true;
+                logger.error('🚨 Circuit breaker opened due to consecutive failures. Will retry after cooldown period.');
+                
+                // Schedule circuit breaker reset after 5 minutes
+                setTimeout(() => {
+                    logger.info('🔄 Circuit breaker cooldown expired, resetting...');
+                    this.isCircuitBreakerOpen = false;
+                    this.consecutiveFailures = 0;
+                }, 300000); // 5 minutes
+            }
+            
             throw new Error(`Model discovery failed: ${error}`);
         }
     }
@@ -296,8 +324,17 @@ export class ModelDiscoveryService {
     private startBackgroundServices(): void {
         if (this.config.enableCaching) {
             this.refreshTimer = setInterval(() => {
+                // Calculate backoff interval based on consecutive failures
+                const backoffMultiplier = Math.min(this.consecutiveFailures, 5);
+                const actualInterval = this.config.cacheRefreshInterval * (1 + backoffMultiplier * 0.5);
+                
+                if (backoffMultiplier > 0) {
+                    logger.info(`⏰ Model refresh with backoff: ${actualInterval}ms due to ${this.consecutiveFailures} failures`);
+                }
+                
                 this.discoverAllModels().catch(error => {
                     logger.error('Background model refresh failed:', error);
+                    // Error handling is now in discoverAllModels with circuit breaker
                 });
             }, this.config.cacheRefreshInterval);
         }

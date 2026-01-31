@@ -67,7 +67,8 @@ export class RequestHandler {
     public async handleChatCompletions(
         req: http.IncomingMessage,
         res: http.ServerResponse,
-        requestId: string
+        requestId: string,
+        cancellationTokenSource: vscode.CancellationTokenSource
     ): Promise<void> {
         const requestLogger = logger.createRequestLogger(requestId);
         const startTime = Date.now();
@@ -241,7 +242,7 @@ export class RequestHandler {
                 const response = await selectedModel.vsCodeModel.sendRequest(
                     vsCodeMessages,
                     requestOptions,
-                    new vscode.CancellationTokenSource().token
+                    cancellationTokenSource.token
                 );
                 
                 // 🌊 处理流式与非流式响应
@@ -586,24 +587,56 @@ export class RequestHandler {
     }
     
     /**
-     * 📋 读取请求体
+     * 📋 读取请求体 - 使用高效的缓冲区收集
      */
     private async readRequestBody(req: http.IncomingMessage): Promise<string> {
         return new Promise((resolve, reject) => {
-            let body = '';
+            const chunks: Buffer[] = [];
+            let totalSize = 0;
+            const MAX_BODY_SIZE = 50 * 1024 * 1024; // 50MB limit for images
+            let isRejected = false;
             
-            req.on('data', chunk => {
-                body += chunk;
+            const cleanup = () => {
+                req.removeAllListeners('data');
+                req.removeAllListeners('end');
+                req.removeAllListeners('error');
+            };
+            
+            req.on('data', (chunk: Buffer) => {
+                if (isRejected) {
+                    return;
+                }
                 
-                // 为多模态内容增加限制
-                if (body.length > 50 * 1024 * 1024) { // 50MB limit for images
+                totalSize += chunk.length;
+                
+                // Check size limit BEFORE adding to array
+                if (totalSize > MAX_BODY_SIZE) {
+                    isRejected = true;
+                    cleanup();
+                    req.destroy();
                     reject(new Error('Request body too large'));
                     return;
                 }
+                
+                chunks.push(chunk);
             });
             
-            req.on('end', () => resolve(body));
-            req.on('error', reject);
+            req.on('end', () => {
+                if (!isRejected) {
+                    cleanup();
+                    // Efficient one-time concatenation
+                    const body = Buffer.concat(chunks, totalSize).toString('utf8');
+                    resolve(body);
+                }
+            });
+            
+            req.on('error', (error) => {
+                if (!isRejected) {
+                    isRejected = true;
+                    cleanup();
+                    reject(error);
+                }
+            });
         });
     }
     
