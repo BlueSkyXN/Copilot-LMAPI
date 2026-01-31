@@ -546,7 +546,7 @@ export class FunctionCallService {
             /%2e/i,              // URL编码的 . (任何形式)
             /%2f/i,              // URL编码的 /
             /%5c/i,              // URL编码的 \
-            /\\/,                // Windows路径分隔符 (Unix only)
+            /\\/,                // Backslash (reject Windows-style paths)
             /^\/[^\/]/,          // 绝对路径
             /^[a-zA-Z]:/,        // Windows驱动器路径
             /%[0-9a-f]{2}/i,     // 任何URL编码都不允许
@@ -575,11 +575,15 @@ export class FunctionCallService {
             throw new Error('规范化后的路径无效');
         }
         
-        // 7. 防止路径段为空或只有点
-        const segments = relativePath.split(path.sep);
+        // 7. 防止路径段为空或只有点 - filter empty segments first
+        const segments = relativePath.split(path.sep).filter(s => s !== '');
         for (const segment of segments) {
-            if (segment === '' || segment === '.' || segment === '..') {
-                throw new Error('路径段无效');
+            if (segment === '.' || segment === '..') {
+                throw new Error('路径段包含非法字符');
+            }
+            // Ensure segment only contains safe characters
+            if (!/^[a-zA-Z0-9_\-\.]+$/.test(segment)) {
+                throw new Error('路径段包含非法字符');
             }
         }
         

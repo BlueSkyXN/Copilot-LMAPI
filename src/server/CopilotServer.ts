@@ -305,10 +305,8 @@ export class CopilotServer {
                     this.sendError(res, HTTP_STATUS.NOT_FOUND, 'Endpoint not found', requestId);
             }
         } finally {
-            // Always dispose cancellation token source
-            if (!cancellationTokenSource.token.isCancellationRequested) {
-                cancellationTokenSource.dispose();
-            }
+            // Always dispose cancellation token source to prevent memory leaks
+            cancellationTokenSource.dispose();
         }
     }
     
