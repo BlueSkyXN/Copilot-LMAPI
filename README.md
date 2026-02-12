@@ -13,6 +13,8 @@
 - **本地服务器**：在本地运行，保护隐私和安全
 - **实时监控**：状态栏集成和详细日志记录
 
+
+
 ## 🛠️ 安装方法
 
 ### 方法一：从 VSIX 文件安装（推荐）
@@ -157,3 +159,13 @@ GET http://127.0.0.1:8001/status
 
 在 VS Code 的输出面板中查看日志。
 
+# 核心参考文档 
+- https://code.visualstudio.com/api/extension-guides/ai/language-model
+- https://code.visualstudio.com/api/references/vscode-api#lm
+- https://code.visualstudio.com/api/extension-guides/ai/tools
+- https://code.visualstudio.com/api/extension-guides/ai/ai-extensibility-overview
+- https://code.visualstudio.com/api/extension-guides/ai/chat
+- https://code.visualstudio.com/api/extension-guides/ai/chat-tutorial
+- https://code.visualstudio.com/api/extension-guides/ai/language-model-tutorial
+- https://code.visualstudio.com/api/extension-guides/ai/language-model-chat-provider
+- https://code.visualstudio.com/api/extension-guides/ai/prompt-tsx

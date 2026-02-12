@@ -141,3 +141,5 @@ vite.config.ts.timestamp-*
 .DS_Store
 *.vsix
 CLAUDE.md
+docs/PLAN.md
+AGENTS.md
