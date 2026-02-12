@@ -18,9 +18,6 @@ let healthCheckTimer: NodeJS.Timeout;
 export function activate(context: vscode.ExtensionContext) {
     logger.info('Copilot-LMAPI extension activating');
 
-    // 在激活时检查 Copilot 可用性
-    showCopilotSetupIfNeeded();
-
     // 初始化服务器
     server = new CopilotServer();
 
@@ -35,18 +32,24 @@ export function activate(context: vscode.ExtensionContext) {
     // 注册命令
     registerCommands(context);
 
-    // 如果配置了则自动启动
-    const config = vscode.workspace.getConfiguration('copilot-lmapi');
-    if (config.get<boolean>('autoStart', false)) {
-        // 自动启动前先做健康检查
-        checkCopilotHealth().then(hasCopilot => {
-            if (hasCopilot) {
-                vscode.commands.executeCommand(COMMANDS.START);
-            } else {
-                logger.warn('Auto-start skipped: GitHub Copilot is not available.');
-            }
-        });
-    }
+    // 延迟检查 Copilot 可用性和自动启动 - 给 Copilot 足够初始化时间
+    setTimeout(() => {
+        // 检查 Copilot 可用性
+        showCopilotSetupIfNeeded();
+
+        // 如果配置了则自动启动
+        const config = vscode.workspace.getConfiguration('copilot-lmapi');
+        if (config.get<boolean>('autoStart', false)) {
+            // 自动启动前先做健康检查
+            checkCopilotHealth().then(hasCopilot => {
+                if (hasCopilot) {
+                    vscode.commands.executeCommand(COMMANDS.START);
+                } else {
+                    logger.warn('Auto-start skipped: GitHub Copilot is not available.');
+                }
+            });
+        }
+    }, HEALTH_CHECK.STARTUP_DELAY);
 
     // 设置定期健康检查
     healthCheckTimer = setInterval(async () => {

@@ -121,8 +121,9 @@ export const RATE_LIMITS = {
 
 // 健康检查配置
 export const HEALTH_CHECK = {
-    INTERVAL: 30000, // 30 秒
-    TIMEOUT: 5000,   // 5 秒
+    INTERVAL: 600000, // 10 分钟 (从30秒优化)
+    TIMEOUT: 5000,    // 5 秒
+    STARTUP_DELAY: 20000, // 启动延迟 20 秒，等待 Copilot 初始化
 } as const;
 
 // 开发/调试标志
