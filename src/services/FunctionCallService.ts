@@ -8,9 +8,14 @@ import * as vscode from 'vscode';
 import { 
     FunctionDefinition, 
     ToolCall, 
-    EnhancedMessage,
     ModelCapabilities 
 } from '../types/ModelCapabilities';
+import {
+    OpenAIFunction,
+    OpenAIFunctionCallChoice,
+    OpenAITool,
+    OpenAIToolChoice
+} from '../types/OpenAI';
 import { logger } from '../utils/Logger';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -180,32 +185,102 @@ export class FunctionCallService {
     /**
      * 🚀 将 OpenAI 函数转换为 VS Code 工具格式
      */
-    public convertFunctionsToTools(functions: FunctionDefinition[]): any[] {
-        const tools: any[] = [];
-        
+    public convertFunctionsToTools(functions: FunctionDefinition[]): vscode.LanguageModelChatTool[] {
+        return functions.map(func => ({
+            name: func.name,
+            description: func.description || '',
+            inputSchema: func.parameters || { type: 'object', properties: {} }
+        }));
+    }
+
+    /**
+     * 🔄 将 OpenAI tool 定义转换为 FunctionDefinition
+     */
+    private convertOpenAIToolsToFunctions(tools: OpenAITool[]): FunctionDefinition[] {
+        return tools
+            .filter(tool => tool?.type === 'function' && !!tool.function?.name)
+            .map(tool => ({
+                name: tool.function.name,
+                description: tool.function.description,
+                parameters: (tool.function.parameters as FunctionDefinition['parameters']) || { type: 'object', properties: {} }
+            }));
+    }
+
+    /**
+     * 🔧 为 VS Code LM 请求准备工具配置（含 tool_choice/function_call 语义）
+     */
+    public prepareToolsForRequest(
+        functions: OpenAIFunction[] = [],
+        tools: OpenAITool[] = [],
+        toolChoice?: OpenAIToolChoice,
+        functionCall?: OpenAIFunctionCallChoice
+    ): { tools: vscode.LanguageModelChatTool[]; toolMode?: vscode.LanguageModelChatToolMode } {
+        const disableTools = toolChoice !== undefined
+            ? toolChoice === 'none'
+            : functionCall === 'none';
+        if (disableTools) {
+            return { tools: [] };
+        }
+
+        const mergedDefinitions = new Map<string, FunctionDefinition>();
+
         for (const func of functions) {
-            try {
-                // 检查是否有此函数的处理程序
-                const registryEntry = this.toolRegistry.get(func.name);
-                
-                if (registryEntry && registryEntry.isEnabled) {
-                    // 创建 VS Code 工具 - 为兼容性使用基本对象
-                    const tool = {
-                        name: func.name,
-                        description: func.description || '',
-                        parametersSchema: func.parameters
-                    };
-                    
-                    tools.push(tool);
-                } else {
-                    logger.warn(`⚠️ 函数 ${func.name} 在注册表中未找到或已禁用`);
-                }
-            } catch (error) {
-                logger.error(`转换函数 ${func.name} 失败：`, error as Error);
+            if (!func?.name) {
+                continue;
+            }
+            mergedDefinitions.set(func.name, {
+                name: func.name,
+                description: func.description,
+                parameters: (func.parameters as FunctionDefinition['parameters']) || { type: 'object', properties: {} }
+            });
+        }
+
+        for (const func of this.convertOpenAIToolsToFunctions(tools)) {
+            mergedDefinitions.set(func.name, func);
+        }
+
+        let finalDefinitions = Array.from(mergedDefinitions.values());
+        const forcedToolName = this.resolveForcedToolName(toolChoice, functionCall);
+        if (forcedToolName) {
+            finalDefinitions = finalDefinitions.filter(tool => tool.name === forcedToolName);
+            if (finalDefinitions.length === 0) {
+                throw new Error(`Forced tool "${forcedToolName}" not found in available definitions`);
             }
         }
-        
-        return tools;
+
+        const vsCodeTools = this.convertFunctionsToTools(finalDefinitions);
+        if (vsCodeTools.length === 0) {
+            return { tools: [] };
+        }
+
+        const toolMode = this.resolveToolMode(toolChoice, functionCall);
+        return { tools: vsCodeTools, toolMode };
+    }
+
+    private resolveForcedToolName(
+        toolChoice?: OpenAIToolChoice,
+        functionCall?: OpenAIFunctionCallChoice
+    ): string | undefined {
+        if (toolChoice && typeof toolChoice === 'object') {
+            return toolChoice.function?.name;
+        }
+        if (functionCall && typeof functionCall === 'object') {
+            return functionCall.name;
+        }
+        return undefined;
+    }
+
+    private resolveToolMode(
+        toolChoice?: OpenAIToolChoice,
+        functionCall?: OpenAIFunctionCallChoice
+    ): vscode.LanguageModelChatToolMode {
+        if (toolChoice === 'required' || (toolChoice && typeof toolChoice === 'object')) {
+            return vscode.LanguageModelChatToolMode.Required;
+        }
+        if (functionCall && typeof functionCall === 'object') {
+            return vscode.LanguageModelChatToolMode.Required;
+        }
+        return vscode.LanguageModelChatToolMode.Auto;
     }
     
     /**

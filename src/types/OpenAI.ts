@@ -4,9 +4,19 @@
  */
 
 export interface OpenAIMessage {
-    role: 'system' | 'user' | 'assistant';
-    content: string;
+    role: 'system' | 'user' | 'assistant' | 'tool' | 'function';
+    content: string | null | Array<{
+        type: 'text' | 'image_url';
+        text?: string;
+        image_url?: {
+            url: string;
+            detail?: 'low' | 'high' | 'auto';
+        };
+    }>;
     name?: string;
+    tool_calls?: OpenAIToolCall[];
+    tool_call_id?: string;
+    function_call?: OpenAIFunctionCall;
 }
 
 export interface OpenAIFunction {
@@ -15,10 +25,28 @@ export interface OpenAIFunction {
     parameters?: Record<string, any>;
 }
 
+export interface OpenAIFunctionCall {
+    name: string;
+    arguments: string;
+}
+
+export interface OpenAIToolCall {
+    id: string;
+    type: 'function';
+    function: OpenAIFunctionCall;
+}
+
 export interface OpenAITool {
     type: 'function';
     function: OpenAIFunction;
 }
+
+export type OpenAIFunctionCallChoice = 'none' | 'auto' | { name: string };
+export type OpenAIToolChoice =
+    | 'none'
+    | 'auto'
+    | 'required'
+    | { type: 'function'; function: { name: string } };
 
 export interface OpenAICompletionRequest {
     model: string;
@@ -34,9 +62,9 @@ export interface OpenAICompletionRequest {
     logit_bias?: Record<string, number>;
     user?: string;
     functions?: OpenAIFunction[];
-    function_call?: 'none' | 'auto' | { name: string };
+    function_call?: OpenAIFunctionCallChoice;
     tools?: OpenAITool[];
-    tool_choice?: 'none' | 'auto' | { type: 'function'; function: { name: string } };
+    tool_choice?: OpenAIToolChoice;
 }
 
 export interface OpenAIUsage {
@@ -66,14 +94,11 @@ export interface OpenAIStreamChoice {
     delta: {
         role?: 'assistant';
         content?: string;
-        function_call?: {
-            name?: string;
-            arguments?: string;
-        };
+        function_call?: Partial<OpenAIFunctionCall>;
         tool_calls?: Array<{
             index: number;
-            id: string;
-            type: 'function';
+            id?: string;
+            type?: 'function';
             function: {
                 name?: string;
                 arguments?: string;

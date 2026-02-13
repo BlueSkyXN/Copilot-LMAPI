@@ -16,13 +16,13 @@ import { FunctionCallService } from '../services/FunctionCallService';
 import {
     ModelCapabilities,
     EnhancedMessage,
-    EnhancedRequestContext,
-    FunctionDefinition,
-    ToolCall
+    EnhancedRequestContext
 } from '../types/ModelCapabilities';
+import { OpenAITool, ValidatedRequest } from '../types/OpenAI';
 
 import { ServerState } from '../types/VSCode';
 import { 
+    LIMITS,
     HTTP_STATUS, 
     CONTENT_TYPES, 
     SSE_HEADERS,
@@ -81,7 +81,37 @@ export class RequestHandler {
             requestLogger.info('🚀 Processing enhanced chat completion request');
             
             // 读取并解析请求体并验证
-            const body = await this.readRequestBody(req);
+            let body: string;
+            try {
+                body = await this.readRequestBody(req);
+            } catch (bodyReadError) {
+                if (bodyReadError instanceof Error && bodyReadError.message === 'Request body too large') {
+                    requestLogger.warn('Request body exceeded configured limit');
+                    this.sendErrorResponse(
+                        res,
+                        HTTP_STATUS.PAYLOAD_TOO_LARGE,
+                        'Request body too large',
+                        ERROR_CODES.INVALID_REQUEST,
+                        requestId
+                    );
+                    if (!req.destroyed) {
+                        req.resume();
+                        req.once('end', () => {
+                            if (!req.destroyed) {
+                                req.destroy();
+                            }
+                        });
+                    }
+                    return;
+                }
+
+                if (bodyReadError instanceof Error && bodyReadError.message === 'Request aborted by client') {
+                    requestLogger.warn('Client aborted request while reading body');
+                    return;
+                }
+
+                throw bodyReadError;
+            }
             
             // 解析JSON并处理错误
             let rawRequestData: any;
@@ -99,7 +129,7 @@ export class RequestHandler {
             }
             
             // 使用验证器验证请求
-            let validatedRequest: any;
+            let validatedRequest: ValidatedRequest;
             try {
                 validatedRequest = Validator.validateChatCompletionRequest(
                     rawRequestData,
@@ -127,14 +157,19 @@ export class RequestHandler {
                 return;
             }
             
-            const requestData = validatedRequest;
+            const requestData: ValidatedRequest = validatedRequest;
             
             // 提取增强消息和请求参数
             const messages: EnhancedMessage[] = requestData.messages;
             const requestedModel = requestData.model;
             const isStream = requestData.stream || false;
-            const functions: FunctionDefinition[] = requestData.functions || [];
-            const tools = requestData.tools || [];
+            const functions = requestData.functions || [];
+            const tools: OpenAITool[] = requestData.tools || [];
+            const toolChoice = requestData.tool_choice;
+            const functionCall = requestData.function_call;
+            const preferLegacyFunctionCall = functions.length > 0 && tools.length === 0;
+            const requiresToolCall = this.isRequiredToolMode(toolChoice, functionCall);
+            const requiredModeParam = toolChoice !== undefined ? 'tool_choice' : 'function_call';
             
             requestLogger.info('📋 Request analysis:', {
                 model: requestedModel,
@@ -219,40 +254,127 @@ export class RequestHandler {
                 selectedModel
             );
             
-            // 如果支持则准备工具
-            let vsCodeTools: any[] = [];
-            if (selectedModel.supportsTools && (functions.length > 0 || tools.length > 0)) {
+            // 如果请求包含工具定义，则准备 VS Code 工具配置
+            let vsCodeTools: vscode.LanguageModelChatTool[] = [];
+            let toolMode: vscode.LanguageModelChatToolMode | undefined;
+            if (functions.length > 0 || tools.length > 0) {
                 try {
-                    vsCodeTools = this.functionService.convertFunctionsToTools(functions);
-                    requestLogger.info(`🛠️ Prepared ${vsCodeTools.length} tools for execution`);
+                    const toolConfig = this.functionService.prepareToolsForRequest(
+                        functions,
+                        tools,
+                        toolChoice,
+                        functionCall
+                    );
+                    vsCodeTools = toolConfig.tools;
+                    toolMode = toolConfig.toolMode;
+                    requestLogger.info(`🛠️ Prepared ${vsCodeTools.length} tools for LM request`, {
+                        toolMode,
+                        requestedTools: tools.length,
+                        requestedFunctions: functions.length
+                    });
                 } catch (error) {
                     requestLogger.warn('Failed to prepare tools:', { error: String(error) });
+                    if (requiresToolCall) {
+                        this.sendErrorResponse(
+                            res,
+                            HTTP_STATUS.BAD_REQUEST,
+                            `Failed to prepare required tools: ${this.stringifyError(error)}`,
+                            ERROR_CODES.INVALID_REQUEST,
+                            requestId,
+                            requiredModeParam
+                        );
+                        return;
+                    }
                 }
+            }
+
+            if (!selectedModel.supportsTools && vsCodeTools.length > 0) {
+                requestLogger.warn('Model capability probe reports supportsTools=false, continuing with runtime attempt', {
+                    model: selectedModel.id,
+                    requiredToolMode: requiresToolCall,
+                    tools: vsCodeTools.length
+                });
             }
             
             // 🚀 向 VS CODE LM API 发送请求
             try {
                 requestLogger.info('📨 Sending request to VS Code LM API...');
                 
-                const requestOptions: any = {
-                    tools: vsCodeTools.length > 0 ? vsCodeTools : undefined
+                const requestOptions: vscode.LanguageModelChatRequestOptions = {};
+                if (vsCodeTools.length > 0) {
+                    requestOptions.tools = vsCodeTools;
+                }
+                if (toolMode && vsCodeTools.length > 0) {
+                    requestOptions.toolMode = toolMode;
+                }
+                const requestCancellation = new vscode.CancellationTokenSource();
+                const cancelOnAborted = () => {
+                    if (!requestCancellation.token.isCancellationRequested) {
+                        requestLogger.warn('Client request aborted, cancelling LM request');
+                        requestCancellation.cancel();
+                    }
                 };
-                
-                const response = await selectedModel.vsCodeModel.sendRequest(
-                    vsCodeMessages,
-                    requestOptions,
-                    new vscode.CancellationTokenSource().token
-                );
-                
-                // 🌊 处理流式与非流式响应
-                if (isStream) {
-                    await this.handleStreamingResponse(response, res, context, requestLogger);
-                } else {
-                    await this.handleNonStreamingResponse(response, res, context, requestLogger);
+                const cancelOnClose = () => {
+                    if (!res.writableEnded && !requestCancellation.token.isCancellationRequested) {
+                        requestLogger.warn('Client connection closed, cancelling LM request');
+                        requestCancellation.cancel();
+                    }
+                };
+
+                req.once('aborted', cancelOnAborted);
+                res.once('close', cancelOnClose);
+
+                try {
+                    const response = await this.sendRequestWithToolFallback(
+                        selectedModel.vsCodeModel,
+                        vsCodeMessages,
+                        requestOptions,
+                        requestCancellation.token,
+                        requestLogger,
+                        vsCodeTools.length > 0 && !requiresToolCall
+                    );
+                    
+                    // 🌊 处理流式与非流式响应
+                    if (isStream) {
+                        await this.handleStreamingResponse(
+                            response,
+                            res,
+                            context,
+                            requestLogger,
+                            requiresToolCall,
+                            requiredModeParam
+                        );
+                    } else {
+                        await this.handleNonStreamingResponse(
+                            response,
+                            res,
+                            context,
+                            requestLogger,
+                            preferLegacyFunctionCall,
+                            requiresToolCall,
+                            requiredModeParam
+                        );
+                    }
+                } finally {
+                    req.removeListener('aborted', cancelOnAborted);
+                    res.removeListener('close', cancelOnClose);
+                    requestCancellation.dispose();
                 }
                 
             } catch (lmError) {
                 requestLogger.error('❌ VS Code LM API error:', lmError as Error);
+
+                if (requiresToolCall && vsCodeTools.length > 0 && this.isLikelyToolModeError(lmError)) {
+                    this.sendErrorResponse(
+                        res,
+                        HTTP_STATUS.BAD_REQUEST,
+                        `Model failed to satisfy required tool-calling request: ${this.stringifyError(lmError)}`,
+                        ERROR_CODES.INVALID_REQUEST,
+                        requestId,
+                        toolChoice !== undefined ? 'tool_choice' : 'function_call'
+                    );
+                    return;
+                }
                 
                 // 使用增强错误映射处理特定的 LM API 错误
                 if (lmError instanceof vscode.LanguageModelError) {
@@ -426,7 +548,9 @@ export class RequestHandler {
         response: vscode.LanguageModelChatResponse,
         res: http.ServerResponse,
         context: EnhancedRequestContext,
-        requestLogger: any
+        requestLogger: any,
+        requiresToolCall: boolean,
+        requiredModeParam: string
     ): Promise<void> {
         res.writeHead(HTTP_STATUS.OK, SSE_HEADERS);
         
@@ -438,7 +562,10 @@ export class RequestHandler {
             for await (const chunk of Converter.extractStreamContent(
                 response, 
                 context, 
-                context.selectedModel!
+                context.selectedModel!,
+                {
+                    requiresToolCall
+                }
             )) {
                 res.write(chunk);
                 chunkCount++;
@@ -448,6 +575,16 @@ export class RequestHandler {
             
         } catch (error) {
             requestLogger.error('❌ Enhanced streaming error:', error);
+            const errorText = this.stringifyError(error);
+            if (requiresToolCall && errorText.includes('required tool mode')) {
+                const errorEvent = Converter.createSSEEvent('error', {
+                    message: 'Model did not produce any tool calls despite required mode',
+                    type: ERROR_CODES.INVALID_REQUEST,
+                    param: requiredModeParam
+                });
+                res.write(errorEvent);
+                return;
+            }
             
             const errorEvent = Converter.createSSEEvent('error', {
                 message: 'Enhanced stream processing error',
@@ -466,24 +603,42 @@ export class RequestHandler {
         response: vscode.LanguageModelChatResponse,
         res: http.ServerResponse,
         context: EnhancedRequestContext,
-        requestLogger: any
+        requestLogger: any,
+        preferLegacyFunctionCall: boolean,
+        requiresToolCall: boolean,
+        requiredModeParam: string
     ): Promise<void> {
         try {
             requestLogger.info('📋 Collecting enhanced full response...');
             
-            const fullContent = await Converter.collectFullResponse(response);
+            const fullResponse = await Converter.collectFullResponse(response);
+            if (requiresToolCall && fullResponse.toolCalls.length === 0) {
+                requestLogger.warn('Model returned no tool calls despite required mode');
+                this.sendErrorResponse(
+                    res,
+                    HTTP_STATUS.BAD_REQUEST,
+                    'Model did not produce any tool calls despite required mode',
+                    ERROR_CODES.INVALID_REQUEST,
+                    context.requestId,
+                    requiredModeParam
+                );
+                return;
+            }
             
             const completionResponse = Converter.createCompletionResponse(
-                fullContent, 
+                fullResponse.content, 
                 context,
-                context.selectedModel!
+                context.selectedModel!,
+                fullResponse.toolCalls,
+                preferLegacyFunctionCall
             );
             
             res.writeHead(HTTP_STATUS.OK, { 'Content-Type': CONTENT_TYPES.JSON });
             res.end(JSON.stringify(completionResponse, null, 2));
             
             requestLogger.info('✅ Enhanced response sent:', {
-                contentLength: fullContent.length,
+                contentLength: fullResponse.content.length,
+                toolCalls: fullResponse.toolCalls.length,
                 tokens: completionResponse.usage.total_tokens,
                 model: context.selectedModel!.id
             });
@@ -492,6 +647,95 @@ export class RequestHandler {
             requestLogger.error('❌ Error collecting enhanced response:', error as Error);
             throw error;
         }
+    }
+
+    /**
+     * 🧭 是否为强制工具调用语义（不能自动降级）
+     */
+    private isRequiredToolMode(
+        toolChoice: ValidatedRequest['tool_choice'],
+        functionCall: ValidatedRequest['function_call']
+    ): boolean {
+        if (toolChoice === 'required') {
+            return true;
+        }
+        if (toolChoice && typeof toolChoice === 'object') {
+            return true;
+        }
+        if (functionCall && typeof functionCall === 'object') {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 🚦 发送请求：工具失败时可选自动降级重试一次
+     */
+    private async sendRequestWithToolFallback(
+        model: vscode.LanguageModelChat,
+        messages: vscode.LanguageModelChatMessage[],
+        requestOptions: vscode.LanguageModelChatRequestOptions,
+        token: vscode.CancellationToken,
+        requestLogger: any,
+        allowToolFallback: boolean
+    ): Promise<vscode.LanguageModelChatResponse> {
+        try {
+            return await model.sendRequest(messages, requestOptions, token);
+        } catch (error) {
+            const hasTools = Array.isArray(requestOptions.tools) && requestOptions.tools.length > 0;
+            if (
+                !allowToolFallback ||
+                !hasTools ||
+                token.isCancellationRequested ||
+                !this.isLikelyToolModeError(error)
+            ) {
+                throw error;
+            }
+
+            requestLogger.warn('LM request with tools failed due probable tool-mode incompatibility, retrying once without tools', {
+                error: String(error)
+            });
+
+            const fallbackOptions: vscode.LanguageModelChatRequestOptions = {
+                ...requestOptions,
+                tools: undefined,
+                toolMode: undefined
+            };
+
+            try {
+                return await model.sendRequest(messages, fallbackOptions, token);
+            } catch (fallbackError) {
+                requestLogger.error('LM fallback request without tools also failed', fallbackError as Error);
+                throw fallbackError;
+            }
+        }
+    }
+
+    /**
+     * 🔍 判断是否是工具模式相关错误（用于控制是否降级）
+     */
+    private isLikelyToolModeError(error: unknown): boolean {
+        const message = this.stringifyError(error).toLowerCase();
+        return (
+            message.includes('toolmode') ||
+            message.includes('tool mode') ||
+            message.includes('tool_mode') ||
+            message.includes('tools are not supported') ||
+            message.includes('does not support tools') ||
+            message.includes('does not support function') ||
+            message.includes('function call is not supported') ||
+            /\btool\s*(call|use|invocation)\b/.test(message)
+        );
+    }
+
+    /**
+     * 🧾 统一错误文本提取
+     */
+    private stringifyError(error: unknown): string {
+        if (error instanceof Error) {
+            return error.message || String(error);
+        }
+        return String(error);
     }
     
     /**
@@ -578,8 +822,13 @@ export class RequestHandler {
         }
         
         const errorResponse = Converter.createErrorResponse(message, type, undefined, param);
-        
-        res.writeHead(statusCode, { 'Content-Type': CONTENT_TYPES.JSON });
+
+        const headers: Record<string, string> = { 'Content-Type': CONTENT_TYPES.JSON };
+        if (statusCode === HTTP_STATUS.PAYLOAD_TOO_LARGE) {
+            headers.Connection = 'close';
+        }
+
+        res.writeHead(statusCode, headers);
         res.end(JSON.stringify(errorResponse, null, 2));
         
         logger.error(`❌ Enhanced error response: ${statusCode}`, new Error(message), { type, param }, requestId);
@@ -590,20 +839,60 @@ export class RequestHandler {
      */
     private async readRequestBody(req: http.IncomingMessage): Promise<string> {
         return new Promise((resolve, reject) => {
-            let body = '';
-            
-            req.on('data', chunk => {
-                body += chunk;
-                
-                // 为多模态内容增加限制
-                if (body.length > 50 * 1024 * 1024) { // 50MB limit for images
-                    reject(new Error('Request body too large'));
+            const chunks: Buffer[] = [];
+            let totalBytes = 0;
+            let settled = false;
+
+            const cleanup = () => {
+                req.removeListener('data', onData);
+                req.removeListener('end', onEnd);
+                req.removeListener('error', onError);
+                req.removeListener('aborted', onAborted);
+            };
+
+            const fail = (error: Error) => {
+                if (settled) {
                     return;
                 }
-            });
-            
-            req.on('end', () => resolve(body));
-            req.on('error', reject);
+                settled = true;
+                cleanup();
+                reject(error);
+            };
+
+            const onData = (chunk: Buffer | string) => {
+                const chunkBuffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+                totalBytes += chunkBuffer.length;
+
+                if (totalBytes > LIMITS.MAX_REQUEST_BODY_BYTES) {
+                    req.resume();
+                    req.once('end', () => {
+                        if (!req.destroyed) {
+                            req.destroy();
+                        }
+                    });
+                    fail(new Error('Request body too large'));
+                    return;
+                }
+
+                chunks.push(chunkBuffer);
+            };
+
+            const onEnd = () => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                cleanup();
+                resolve(Buffer.concat(chunks).toString('utf8'));
+            };
+
+            const onError = (error: Error) => fail(error);
+            const onAborted = () => fail(new Error('Request aborted by client'));
+
+            req.on('data', onData);
+            req.once('end', onEnd);
+            req.once('error', onError);
+            req.once('aborted', onAborted);
         });
     }
     
@@ -612,7 +901,7 @@ export class RequestHandler {
      */
     private getClientIP(req: http.IncomingMessage): string {
         return (req.headers['x-forwarded-for'] as string)?.split(',')[0] ||
-               req.connection.remoteAddress ||
+               req.socket?.remoteAddress ||
                '127.0.0.1';
     }
     
