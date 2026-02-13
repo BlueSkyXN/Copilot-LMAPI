@@ -20,8 +20,7 @@ export interface ModelCapabilities {
     
     // 功能支持检测
     supportsVision: boolean;
-    supportsTools: boolean;
-    supportsFunctionCalling: boolean;
+    supportsTools: boolean; // 支持工具/函数调用 (OpenAI tools/functions)
     supportsStreaming: boolean;
     supportsMultimodal: boolean;
     
