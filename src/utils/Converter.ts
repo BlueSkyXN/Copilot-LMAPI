@@ -7,6 +7,9 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as http from 'http';
+import * as https from 'https';
+import * as net from 'net';
 import { 
     EnhancedMessage, 
     ModelCapabilities, 
@@ -31,7 +34,30 @@ interface StreamExtractionOptions {
 }
 
 export class Converter {
-    
+
+    // LanguageModelDataPart 运行时检测缓存
+    private static _dataPartCtor: ((new (data: Uint8Array, mimeType: string) => any) | null) | undefined = undefined;
+
+    /**
+     * 运行时检测 LanguageModelDataPart 是否可用（新版 VS Code 才有）
+     */
+    private static get DataPartCtor(): (new (data: Uint8Array, mimeType: string) => any) | null {
+        if (this._dataPartCtor === undefined) {
+            try {
+                const ctor = (vscode as any).LanguageModelDataPart;
+                this._dataPartCtor = (typeof ctor === 'function') ? ctor : null;
+            } catch {
+                this._dataPartCtor = null;
+            }
+            if (this._dataPartCtor) {
+                logger.info('LanguageModelDataPart available at runtime — binary image support enabled');
+            } else {
+                logger.info('LanguageModelDataPart not available — images will be sent as text descriptions');
+            }
+        }
+        return this._dataPartCtor as (new (data: Uint8Array, mimeType: string) => any) | null;
+    }
+
     /**
      * 🎨 将增强消息转换为 VS Code LM API 格式
      * ✨ 支持图像和多模态内容！
@@ -176,44 +202,88 @@ export class Converter {
         message: EnhancedMessage,
         selectedModel: ModelCapabilities
     ): Promise<vscode.LanguageModelChatMessage | null> {
-        
+
         if (!Array.isArray(message.content)) {
             return null;
         }
-        
-        const contentParts: (vscode.LanguageModelTextPart | vscode.LanguageModelToolResultPart)[] = [];
-        let textContent = this.formatRolePrefix(message.role);
-        
+
+        const DataPartCtor = this.DataPartCtor;
+        const canSendBinary = DataPartCtor !== null && selectedModel.supportsVision;
+
+        // 类型放宽为 any[] 因为 LanguageModelDataPart 不在 @types/vscode 声明中
+        const contentParts: any[] = [];
+        let textBuffer = this.formatRolePrefix(message.role);
+
         for (const part of message.content) {
             if (part.type === 'text' && part.text) {
-                textContent += part.text;
-                
+                textBuffer += part.text;
+
             } else if (part.type === 'image_url' && part.image_url) {
-                
-                // 🔥 革命性：如果模型支持视觉则处理图像！
-                if (selectedModel.supportsVision) {
+
+                if (!selectedModel.supportsVision) {
+                    logger.warn(`模型 ${selectedModel.id} 不支持视觉，跳过图像`);
+                    textBuffer += '\n[Image skipped: model does not support vision]\n';
+                    continue;
+                }
+
+                if (canSendBinary) {
+                    // 先 flush 已积累的文本
+                    if (textBuffer.trim()) {
+                        contentParts.push(new vscode.LanguageModelTextPart(textBuffer));
+                        textBuffer = '';
+                    }
+
                     try {
-                        const imageContent = await this.processImageContent(part.image_url.url);
-                        if (imageContent) {
-                            textContent += `\n[Image: ${imageContent.description}]\n`;
-                            // 注意：VS Code LM API 可能以不同方式处理图像
-                            // 目前这是一个文本表示
+                        const imageData = await this.resolveImageData(part.image_url.url);
+                        if (imageData) {
+                            // 检查大小限制
+                            const maxSize = selectedModel.maxImageSize || 3 * 1024 * 1024;
+                            if (imageData.data.length > maxSize) {
+                                logger.warn(`图片过大 (${imageData.data.length} bytes)，超过模型限制 ${maxSize} bytes`);
+                                textBuffer += `\n[Image skipped: ${(imageData.data.length / 1024 / 1024).toFixed(1)}MB exceeds ${(maxSize / 1024 / 1024).toFixed(1)}MB limit]\n`;
+                            } else {
+                                const dataPart = new DataPartCtor!(
+                                    new Uint8Array(imageData.data),
+                                    imageData.mimeType
+                                );
+                                contentParts.push(dataPart);
+                                logger.debug(`Added binary image: ${imageData.mimeType}, ${imageData.data.length} bytes`);
+                            }
+                        } else {
+                            // resolveImageData 返回 null（远程下载关闭或解析失败）
+                            const desc = await this.processImageContent(part.image_url.url);
+                            textBuffer += `\n[Image: ${desc?.description || part.image_url.url.substring(0, 80)}]\n`;
                         }
                     } catch (error) {
-                        logger.warn(`处理图像失败：`, error as Error);
-                        textContent += `\n[Image: ${part.image_url.url}]\n`;
+                        logger.warn('处理图像失败:', error as Error);
+                        textBuffer += `\n[Image: failed to process]\n`;
                     }
                 } else {
-                    logger.warn(`模型 ${selectedModel.id} 不支持视觉，跳过图像`);
-                    textContent += `\n[所选模型不支持图像]\n`;
+                    // VS Code 版本过旧，无 LanguageModelDataPart — 退回文本描述
+                    try {
+                        const desc = await this.processImageContent(part.image_url.url);
+                        if (desc) {
+                            textBuffer += `\n[Image: ${desc.description}]\n`;
+                        } else {
+                            textBuffer += `\n[Image: ${part.image_url.url.substring(0, 80)}]\n`;
+                        }
+                    } catch (error) {
+                        logger.warn('处理图像描述失败:', error as Error);
+                        textBuffer += `\n[Image: ${part.image_url.url.substring(0, 80)}]\n`;
+                    }
                 }
             }
         }
-        
-        // 添加文本部分
-        contentParts.push(new vscode.LanguageModelTextPart(textContent));
-        
-        // 使用正确的角色映射创建消息
+
+        // flush 剩余文本
+        if (textBuffer.trim()) {
+            contentParts.push(new vscode.LanguageModelTextPart(textBuffer));
+        }
+
+        if (contentParts.length === 0) {
+            return null;
+        }
+
         return new vscode.LanguageModelChatMessage(
             this.mapRoleToVSCode(message.role),
             contentParts
@@ -266,6 +336,225 @@ export class Converter {
             logger.error('Error processing image:', error as Error);
             return null;
         }
+    }
+
+    // ============================================================
+    // 图片二进制数据解析（用于 LanguageModelDataPart）
+    // ============================================================
+
+    /**
+     * 将图片 URL 解析为二进制数据 + MIME 类型
+     * 支持：data: URI、http/https URL（需配置启用）、本地文件
+     */
+    private static async resolveImageData(
+        imageUrl: string
+    ): Promise<{ data: Buffer; mimeType: string } | null> {
+        if (imageUrl.startsWith('data:image/')) {
+            return this.resolveBase64Image(imageUrl);
+        }
+
+        if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
+            const config = vscode.workspace.getConfiguration('copilot-lmapi');
+            const allowRemote = config.get<boolean>('allowRemoteImageDownload', false);
+            if (!allowRemote) {
+                logger.debug('Remote image download disabled, skipping URL image');
+                return null;
+            }
+            return this.downloadRemoteImage(imageUrl, config);
+        }
+
+        if (imageUrl.startsWith('file://') || await this.fileExists(imageUrl)) {
+            return this.readLocalImage(imageUrl);
+        }
+
+        return null;
+    }
+
+    /**
+     * 解析 data: URI 为二进制 Buffer
+     */
+    private static resolveBase64Image(dataUri: string): { data: Buffer; mimeType: string } | null {
+        try {
+            const commaIdx = dataUri.indexOf(',');
+            if (commaIdx === -1) {
+                return null;
+            }
+            const header = dataUri.substring(0, commaIdx);
+            const base64Data = dataUri.substring(commaIdx + 1);
+            const mimeType = header.match(/data:([^;]+)/)?.[1] || 'image/jpeg';
+            return { data: Buffer.from(base64Data, 'base64'), mimeType };
+        } catch (error) {
+            logger.error('Failed to decode base64 image:', error as Error);
+            return null;
+        }
+    }
+
+    /**
+     * 下载远程图片（带超时、大小限制、主机白名单）
+     */
+    private static async downloadRemoteImage(
+        url: string,
+        config: vscode.WorkspaceConfiguration
+    ): Promise<{ data: Buffer; mimeType: string } | null> {
+        const maxBytes = config.get<number>('maxImageBytes', 3 * 1024 * 1024);
+        const timeoutMs = config.get<number>('imageFetchTimeoutMs', 10000);
+        const allowedHosts = (config.get<string[]>('allowedImageHosts', []) || [])
+            .map((host) => host.toLowerCase());
+
+        try {
+            const parsedUrl = new URL(url);
+            const hostname = parsedUrl.hostname.toLowerCase();
+
+            if (this.isDisallowedRemoteHost(hostname)) {
+                logger.warn(`Blocked remote image host: ${hostname}`);
+                return null;
+            }
+
+            // 主机白名单检查
+            if (allowedHosts.length > 0 && !allowedHosts.includes(hostname)) {
+                logger.warn(`Image host ${hostname} not in allowedImageHosts`);
+                return null;
+            }
+
+            const get = parsedUrl.protocol === 'https:' ? https.get : http.get;
+
+            return await new Promise<{ data: Buffer; mimeType: string } | null>((resolve) => {
+                const req = get(url, { timeout: timeoutMs }, (res) => {
+                    const status = res.statusCode || 0;
+                    if (status >= 300) {
+                        res.resume();
+                        resolve(null);
+                        return;
+                    }
+
+                    const contentType = (res.headers['content-type'] || 'image/jpeg').split(';')[0].trim();
+                    if (!contentType.startsWith('image/')) {
+                        res.resume();
+                        logger.warn(`Remote image has non-image content-type: ${contentType}`);
+                        resolve(null);
+                        return;
+                    }
+
+                    const chunks: Buffer[] = [];
+                    let received = 0;
+
+                    res.on('data', (chunk: Buffer) => {
+                        received += chunk.length;
+                        if (received > maxBytes) {
+                            req.destroy();
+                            logger.warn(`Remote image exceeds maxImageBytes (${maxBytes})`);
+                            resolve(null);
+                            return;
+                        }
+                        chunks.push(chunk);
+                    });
+
+                    res.on('end', () => {
+                        resolve({ data: Buffer.concat(chunks), mimeType: contentType });
+                    });
+
+                    res.on('error', () => resolve(null));
+                });
+
+                req.on('timeout', () => {
+                    req.destroy();
+                    logger.warn(`Remote image fetch timeout (${timeoutMs}ms)`);
+                    resolve(null);
+                });
+
+                req.on('error', (err) => {
+                    logger.warn('Remote image fetch error:', err);
+                    resolve(null);
+                });
+            });
+        } catch (error) {
+            logger.error('Failed to download remote image:', error as Error);
+            return null;
+        }
+    }
+
+    /**
+     * 读取本地图片文件
+     */
+    private static async readLocalImage(imageUrl: string): Promise<{ data: Buffer; mimeType: string } | null> {
+        try {
+            const filePath = imageUrl.startsWith('file://') ? imageUrl.slice(7) : imageUrl;
+            const resolvedPath = path.resolve(filePath);
+            if (!this.isPathInWorkspace(resolvedPath)) {
+                logger.warn(`Blocked local image path outside workspace: ${resolvedPath}`);
+                return null;
+            }
+
+            const ext = path.extname(filePath).toLowerCase();
+
+            const mimeMap: Record<string, string> = {
+                '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                '.png': 'image/png', '.gif': 'image/gif',
+                '.webp': 'image/webp',
+            };
+
+            const mimeType = mimeMap[ext];
+            if (!mimeType) {
+                logger.warn(`Unsupported image extension: ${ext}`);
+                return null;
+            }
+
+            const config = vscode.workspace.getConfiguration('copilot-lmapi');
+            const maxBytes = config.get<number>('maxImageBytes', 3 * 1024 * 1024);
+            const stats = await fs.promises.stat(resolvedPath);
+            if (stats.size > maxBytes) {
+                logger.warn(`Local image exceeds maxImageBytes (${maxBytes}): ${resolvedPath}`);
+                return null;
+            }
+
+            const data = await fs.promises.readFile(resolvedPath);
+            return { data, mimeType };
+        } catch (error) {
+            logger.error('Failed to read local image:', error as Error);
+            return null;
+        }
+    }
+
+    private static isDisallowedRemoteHost(hostname: string): boolean {
+        if (hostname === 'localhost' || hostname === '::1') {
+            return true;
+        }
+
+        const ipVersion = net.isIP(hostname);
+        if (ipVersion === 4) {
+            const octets = hostname.split('.').map((part) => Number(part));
+            if (octets.length !== 4 || octets.some(Number.isNaN)) {
+                return true;
+            }
+            const [a, b] = octets;
+            return (
+                a === 10 ||
+                a === 127 ||
+                a === 0 ||
+                (a === 169 && b === 254) ||
+                (a === 172 && b >= 16 && b <= 31) ||
+                (a === 192 && b === 168)
+            );
+        }
+
+        if (ipVersion === 6) {
+            return hostname.startsWith('fc') || hostname.startsWith('fd') || hostname.startsWith('fe80:');
+        }
+
+        return false;
+    }
+
+    private static isPathInWorkspace(filePath: string): boolean {
+        const folders = vscode.workspace.workspaceFolders;
+        if (!folders || folders.length === 0) {
+            return false;
+        }
+
+        return folders.some((folder) => {
+            const workspacePath = path.resolve(folder.uri.fsPath);
+            const relative = path.relative(workspacePath, filePath);
+            return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+        });
     }
 
     /**
@@ -379,7 +668,7 @@ export class Converter {
 
     private static estimateToolCallTokens(toolCalls: ToolCall[]): number {
         return toolCalls.reduce((total, call) => {
-            return total + this.estimateTokens(call.function.name + call.function.arguments);
+            return total + this.estimateTokensFallback(call.function.name + call.function.arguments);
         }, 0);
     }
     
@@ -425,13 +714,16 @@ export class Converter {
         context: EnhancedRequestContext,
         selectedModel: ModelCapabilities,
         toolCalls: ToolCall[] = [],
-        preferLegacyFunctionCall: boolean = false
+        preferLegacyFunctionCall: boolean = false,
+        completionTokens?: number
     ): OpenAICompletionResponse {
         const now = Math.floor(Date.now() / 1000);
         const openAIToolCalls = toolCalls.map(call => this.convertToolCallToOpenAI(call));
         const isToolResponse = openAIToolCalls.length > 0;
         const useLegacyFunctionCall = preferLegacyFunctionCall && openAIToolCalls.length === 1;
-        const completionTokens = this.estimateTokens(content) + this.estimateToolCallTokens(toolCalls);
+        const finalCompletionTokens = completionTokens ?? (
+            this.estimateTokensFallback(content) + this.estimateToolCallTokens(toolCalls)
+        );
         const finishReason = isToolResponse
             ? (useLegacyFunctionCall ? 'function_call' : 'tool_calls')
             : 'stop';
@@ -462,8 +754,8 @@ export class Converter {
             }],
             usage: {
                 prompt_tokens: context.estimatedTokens,
-                completion_tokens: completionTokens,
-                total_tokens: context.estimatedTokens + completionTokens
+                completion_tokens: finalCompletionTokens,
+                total_tokens: context.estimatedTokens + finalCompletionTokens
             },
             system_fingerprint: `vs-code-${selectedModel.vendor}-${selectedModel.family}`
         };
@@ -666,6 +958,111 @@ export class Converter {
         
         return { content: fullContent, toolCalls };
     }
+
+    /**
+     * 📏 使用官方 countTokens API 计算 token 数量（失败时降级到本地估算）
+     */
+    public static async countTokensOfficial(
+        model: vscode.LanguageModelChat,
+        input: string | vscode.LanguageModelChatMessage | vscode.LanguageModelChatMessage[],
+        cancellationToken?: vscode.CancellationToken
+    ): Promise<number> {
+        try {
+            if (typeof model.countTokens !== 'function') {
+                return this.estimateTokensForInputFallback(input);
+            }
+
+            if (typeof input === 'string') {
+                return await model.countTokens(input, cancellationToken);
+            }
+
+            if (Array.isArray(input)) {
+                let total = 0;
+                for (const message of input) {
+                    total += await model.countTokens(message, cancellationToken);
+                }
+                return total;
+            }
+
+            return await model.countTokens(input, cancellationToken);
+        } catch (error) {
+            logger.warn('Official countTokens failed, falling back to local estimation', {
+                modelId: model.id,
+                error: String(error)
+            });
+            return this.estimateTokensForInputFallback(input);
+        }
+    }
+
+    private static estimateTokensForInputFallback(
+        input: string | vscode.LanguageModelChatMessage | vscode.LanguageModelChatMessage[]
+    ): number {
+        if (typeof input === 'string') {
+            return this.estimateTokensFallback(input);
+        }
+
+        if (Array.isArray(input)) {
+            return input.reduce((total, message) => total + this.estimateTokensForInputFallback(message), 0);
+        }
+
+        const serialized = this.serializeMessageForTokenEstimate(input);
+        return this.estimateTokensFallback(serialized);
+    }
+
+    private static serializeMessageForTokenEstimate(message: vscode.LanguageModelChatMessage): string {
+        const rawMessage = message as vscode.LanguageModelChatMessage & {
+            content?: unknown;
+            role?: unknown;
+            name?: unknown;
+        };
+
+        const serializedParts: string[] = [];
+        if (typeof rawMessage.role === 'string') {
+            serializedParts.push(rawMessage.role);
+        }
+        if (typeof rawMessage.name === 'string') {
+            serializedParts.push(rawMessage.name);
+        }
+
+        const content = rawMessage.content;
+        if (typeof content === 'string') {
+            serializedParts.push(content);
+            return serializedParts.join('\n');
+        }
+
+        if (Array.isArray(content)) {
+            for (const part of content) {
+                if (typeof part === 'string') {
+                    serializedParts.push(part);
+                    continue;
+                }
+
+                if (part instanceof vscode.LanguageModelTextPart) {
+                    serializedParts.push(part.value);
+                    continue;
+                }
+
+                if (part instanceof vscode.LanguageModelToolCallPart) {
+                    serializedParts.push(part.name, this.stringifyToolInput(part.input));
+                    continue;
+                }
+
+                try {
+                    serializedParts.push(JSON.stringify(part));
+                } catch {
+                    serializedParts.push(String(part));
+                }
+            }
+            return serializedParts.join('\n');
+        }
+
+        try {
+            serializedParts.push(JSON.stringify(rawMessage));
+        } catch {
+            serializedParts.push(String(rawMessage));
+        }
+        return serializedParts.join('\n');
+    }
     
     /**
      * 🔄 创建服务器发送事件数据
@@ -686,7 +1083,7 @@ export class Converter {
     /**
      * 📈 增强令牌估算
      */
-    private static estimateTokens(text: string): number {
+    private static estimateTokensFallback(text: string): number {
         // 更精细的令牌估算
         // 考虑不同语言和特殊令牌
         const baseTokens = Math.ceil(text.length / 4);
@@ -722,13 +1119,13 @@ export class Converter {
         // 估算总令牌数
         const estimatedTokens = messages.reduce((total, msg) => {
             if (typeof msg.content === 'string') {
-                return total + this.estimateTokens(msg.content);
+                return total + this.estimateTokensFallback(msg.content);
             } else if (msg.content === null) {
                 return total;
             } else if (Array.isArray(msg.content)) {
                 return total + msg.content.reduce((partTotal, part) => {
                     if (part.type === 'text' && part.text) {
-                        return partTotal + this.estimateTokens(part.text);
+                        return partTotal + this.estimateTokensFallback(part.text);
                     }
                     return partTotal + 100; // 图像估算
                 }, 0);

@@ -14,6 +14,7 @@ import {
     ModelDiscoveryConfig
 } from '../types/ModelCapabilities';
 import { logger } from '../utils/Logger';
+import { lookupModelCapabilities } from '../data/ModelCapabilityRegistry';
 
 export class ModelDiscoveryService {
     private modelPool: ModelPool;
@@ -159,33 +160,27 @@ export class ModelDiscoveryService {
     }
     
     /**
-     * 👁️ 测试模型是否支持视觉/图像
+     * 👁️ 基于能力注册表检测模型视觉支持
      */
     private async testVisionCapability(model: vscode.LanguageModelChat): Promise<boolean> {
-        try {
-            // GPT-4o 和类似模型支持视觉
-            const visionModels = ['gpt-4o', 'gpt-4-turbo', 'claude-3', 'gemini'];
-            const modelId = model.id.toLowerCase();
-            
-            return visionModels.some(vm => modelId.includes(vm));
-        } catch (error) {
-            return false;
+        const entry = lookupModelCapabilities(model.id);
+        if (entry) {
+            return entry.vision;
         }
+        logger.debug(`Model ${model.id} not in capability registry, default vision=false`);
+        return false;
     }
-    
+
     /**
-     * 🛠️ 测试模型是否支持工具/函数调用
+     * 🛠️ 基于能力注册表检测模型工具调用支持
      */
     private async testToolCapability(model: vscode.LanguageModelChat): Promise<boolean> {
-        try {
-            // 大多数现代模型支持工具
-            const toolModels = ['gpt-4', 'gpt-3.5', 'claude-3', 'gemini'];
-            const modelId = model.id.toLowerCase();
-            
-            return toolModels.some(tm => modelId.includes(tm));
-        } catch (error) {
-            return false;
+        const entry = lookupModelCapabilities(model.id);
+        if (entry) {
+            return entry.toolCalls;
         }
+        logger.debug(`Model ${model.id} not in capability registry, default toolCalls=false`);
+        return false;
     }
     
     /**
@@ -195,15 +190,29 @@ export class ModelDiscoveryService {
         const modelId = capabilities.id.toLowerCase();
         
         // 推断最大输出令牌数
-    if (!capabilities.maxOutputTokens) {
+        if (!capabilities.maxOutputTokens) {
             capabilities.maxOutputTokens = Math.min(capabilities.maxInputTokens * 0.5, 4096);
         }
-        
-        // 为已知视觉模型推断图像能力
-    if (capabilities.supportsVision) {
-            capabilities.maxImageSize = 20 * 1024 * 1024; // 20MB
+
+        // 从注册表获取精确的视觉限制
+        if (capabilities.supportsVision) {
+            const entry = lookupModelCapabilities(capabilities.id);
+            if (entry?.visionLimits) {
+                capabilities.maxImageSize = entry.visionLimits.maxPromptImageSize;
+                capabilities.maxImagesPerRequest = entry.visionLimits.maxPromptImages;
+                capabilities.supportedImageFormats = entry.visionLimits.supportedMediaTypes.map(
+                    mt => mt.replace('image/', '')
+                );
+                capabilities.supportedImageMediaTypes = entry.visionLimits.supportedMediaTypes;
+            } else {
+                // 注册表中没有精确限制时的保守默认值
+                capabilities.maxImageSize = 3 * 1024 * 1024; // 3MB
+                capabilities.maxImagesPerRequest = 1;
+                capabilities.supportedImageFormats = ['jpeg', 'jpg', 'png', 'gif', 'webp'];
+                capabilities.supportedImageMediaTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+            }
         }
-        
+
         // 设置上下文窗口（目前与最大输入相同）
         capabilities.contextWindow = capabilities.maxInputTokens;
     }

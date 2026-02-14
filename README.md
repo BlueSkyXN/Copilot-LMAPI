@@ -6,6 +6,7 @@
 
 - **OpenAI 兼容 API**：完全兼容 OpenAI Chat Completions API
 - **动态模型发现**：实时发现所有可用的 Copilot 模型，无硬编码限制
+- **官方 Token 计数**：上下文校验与非流式 usage 优先使用 `model.countTokens()`
 - **多模态支持**：支持文本和图像输入，自动处理 Base64、URL 和本地文件
 - **函数/工具调用**：完整支持 OpenAI 函数调用规范
 - **智能模型选择**：根据请求需求自动选择最优模型
@@ -92,7 +93,7 @@ GET /v1/models
 
 动态返回当前 Copilot 环境中所有可用的模型列表，包括每个模型的能力信息（视觉支持、工具调用、流式响应等）。
 
-常见模型包括：gpt-4o, claude-3.5-sonnet, gpt-4.1, claude-sonnet-4, gemini-2.0-flash-001, gemini-2.5-pro, o3-mini, o4-mini
+常见模型包括：gpt-5、gpt-5-mini、gpt-5.1、gpt-5.2、claude-sonnet-4.5、claude-opus-4.6、gemini-3-pro-preview（实际以当前 Copilot 账户可见模型为准）
 
 #### 健康检查
 ```
@@ -134,6 +135,12 @@ GET http://127.0.0.1:8001/status
 - **请求限制**：内置过度请求保护
 - **请求验证**：全面的输入验证和清理
 - **错误隔离**：单个请求错误不会影响服务器稳定性
+
+## 🔧 开发者维护说明
+
+- 模型能力（vision/tools/streaming）由 `src/data/ModelCapabilityRegistry.ts` 维护，建议定期对照 Copilot Models 数据更新。
+- 注册表查找采用“精确匹配 + 带分隔符约束的最长前缀匹配”，避免 `gpt-4` 误匹配 `gpt-4o` 一类冲突。
+- 请求 token 校验与非流式 usage 统计优先使用 VS Code LM API 官方 `countTokens`，若调用失败会降级到本地估算。
 
 ## 🚨 故障排除
 

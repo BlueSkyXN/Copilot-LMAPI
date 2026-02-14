@@ -12,6 +12,10 @@ export const DEFAULT_CONFIG = {
     enableLogging: true,
     maxConcurrentRequests: 10,
     requestTimeout: 120000, // 2 分钟
+    // 图片处理
+    allowRemoteImageDownload: false,
+    maxImageBytes: 3 * 1024 * 1024, // 3MB，匹配 Copilot API max_prompt_image_size
+    imageFetchTimeoutMs: 10000,      // 10 秒
 } as const;
 
 export const LIMITS = {

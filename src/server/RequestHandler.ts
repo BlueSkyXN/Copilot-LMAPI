@@ -236,23 +236,30 @@ export class RequestHandler {
                 return;
             }
             
-            // 验证上下文窗口限制（动态！）
-            if (context.estimatedTokens > selectedModel.maxInputTokens) {
-                this.sendErrorResponse(
-                    res,
-                    HTTP_STATUS.BAD_REQUEST,
-                    `Request exceeds model context limit (${context.estimatedTokens} > ${selectedModel.maxInputTokens} tokens)`,
-                    ERROR_CODES.INVALID_REQUEST,
-                    requestId
-                );
-                return;
-            }
-            
             // 将消息转换为 VS Code 格式
             const vsCodeMessages = await Converter.convertMessagesToVSCode(
                 messages, 
                 selectedModel
             );
+
+            // 使用官方 countTokens 计算精确 prompt token 数
+            const promptTokens = await Converter.countTokensOfficial(
+                selectedModel.vsCodeModel,
+                vsCodeMessages
+            );
+            context.estimatedTokens = promptTokens;
+
+            // 验证上下文窗口限制（动态）
+            if (promptTokens > selectedModel.maxInputTokens) {
+                this.sendErrorResponse(
+                    res,
+                    HTTP_STATUS.BAD_REQUEST,
+                    `Request exceeds model context limit (${promptTokens} > ${selectedModel.maxInputTokens} tokens)`,
+                    ERROR_CODES.INVALID_REQUEST,
+                    requestId
+                );
+                return;
+            }
             
             // 如果请求包含工具定义，则准备 VS Code 工具配置
             let vsCodeTools: vscode.LanguageModelChatTool[] = [];
@@ -624,13 +631,22 @@ export class RequestHandler {
                 );
                 return;
             }
+
+            const completionTokenText = `${fullResponse.content}${fullResponse.toolCalls
+                .map(call => `${call.function.name}${call.function.arguments}`)
+                .join('')}`;
+            const completionTokens = await Converter.countTokensOfficial(
+                context.selectedModel!.vsCodeModel,
+                completionTokenText
+            );
             
             const completionResponse = Converter.createCompletionResponse(
                 fullResponse.content, 
                 context,
                 context.selectedModel!,
                 fullResponse.toolCalls,
-                preferLegacyFunctionCall
+                preferLegacyFunctionCall,
+                completionTokens
             );
             
             res.writeHead(HTTP_STATUS.OK, { 'Content-Type': CONTENT_TYPES.JSON });

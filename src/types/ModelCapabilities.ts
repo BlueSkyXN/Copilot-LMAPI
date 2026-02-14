@@ -34,7 +34,8 @@ export interface ModelCapabilities {
     supportedImageFormats?: string[];
     maxImageSize?: number;
     maxImagesPerRequest?: number;
-    
+    supportedImageMediaTypes?: string[];  // 完整 MIME 类型，如 ["image/jpeg", "image/png"]
+
     // 原始 VS Code 模型引用
     vsCodeModel: vscode.LanguageModelChat;
 }

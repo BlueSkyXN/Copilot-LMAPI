@@ -357,24 +357,52 @@ export class Validator {
      * 🖼️ 验证图像 URL 格式
      */
     private static validateImageUrl(url: string, messageIndex: number, partIndex: number): void {
-        // 支持各种图像源
-        const validPatterns = [
-            /^data:image\/(jpeg|jpg|png|gif|webp);base64,/, // Base64
-            /^https?:\/\/.+\.(jpeg|jpg|png|gif|webp)$/i,   // HTTP URLs
-            /^file:\/\/.+\.(jpeg|jpg|png|gif|webp)$/i,     // File URLs
-            /^\/.+\.(jpeg|jpg|png|gif|webp)$/i,           // Absolute paths
-            /^\.\/.+\.(jpeg|jpg|png|gif|webp)$/i,         // Relative paths
-        ];
-        
-        const isValid = validPatterns.some(pattern => pattern.test(url));
-        
-        if (!isValid) {
-            throw new ValidationError(
-                `Invalid image URL format at message ${messageIndex}, part ${partIndex}. Supported: base64, HTTP URLs, file paths`,
-                ERROR_CODES.INVALID_REQUEST,
-                `messages.${messageIndex}.content.${partIndex}.image_url.url`
-            );
+        const paramPath = `messages.${messageIndex}.content.${partIndex}.image_url.url`;
+
+        // 1. data: URI — 要求合法的 base64 图片格式
+        if (url.startsWith('data:image/')) {
+            if (!/^data:image\/(jpeg|jpg|png|gif|webp);base64,/.test(url)) {
+                throw new ValidationError(
+                    `Unsupported image data URI format at message ${messageIndex}, part ${partIndex}`,
+                    ERROR_CODES.INVALID_REQUEST,
+                    paramPath
+                );
+            }
+            return;
         }
+
+        // 2. http/https URL — 仅校验 URL 可解析，内容类型在下载时验证
+        if (url.startsWith('http://') || url.startsWith('https://')) {
+            try {
+                new URL(url);
+            } catch {
+                throw new ValidationError(
+                    `Invalid image URL at message ${messageIndex}, part ${partIndex}`,
+                    ERROR_CODES.INVALID_REQUEST,
+                    paramPath
+                );
+            }
+            return;
+        }
+
+        // 3. file:// 和本地路径 — 要求图片扩展名
+        const imageExtensions = /\.(jpeg|jpg|png|gif|webp)$/i;
+        if (url.startsWith('file://') || url.startsWith('/') || url.startsWith('./')) {
+            if (!imageExtensions.test(url)) {
+                throw new ValidationError(
+                    `Image file path must have a supported extension (.jpg/.png/.gif/.webp) at message ${messageIndex}, part ${partIndex}`,
+                    ERROR_CODES.INVALID_REQUEST,
+                    paramPath
+                );
+            }
+            return;
+        }
+
+        throw new ValidationError(
+            `Unsupported image URL scheme at message ${messageIndex}, part ${partIndex}. Supported: data:, http(s):, file:, or local paths`,
+            ERROR_CODES.INVALID_REQUEST,
+            paramPath
+        );
     }
     
     /**
