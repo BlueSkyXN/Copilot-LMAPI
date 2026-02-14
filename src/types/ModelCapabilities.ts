@@ -4,6 +4,7 @@
  */
 
 import * as vscode from 'vscode';
+import type { OpenAIMessage, OpenAIToolCall } from './OpenAI';
 
 // 🎯 动态模型能力
 export interface ModelCapabilities {
@@ -19,8 +20,7 @@ export interface ModelCapabilities {
     
     // 功能支持检测
     supportsVision: boolean;
-    supportsTools: boolean;
-    supportsFunctionCalling: boolean;
+    supportsTools: boolean; // 支持工具/函数调用 (OpenAI tools/functions)
     supportsStreaming: boolean;
     supportsMultimodal: boolean;
     
@@ -41,31 +41,11 @@ export interface ModelCapabilities {
 
 // （已移除）模型自动选择相关类型
 
-// 🎨 用于多模态的增强消息类型
-export interface EnhancedMessage {
-    role: 'system' | 'user' | 'assistant';
-    content: string | Array<{
-        type: 'text' | 'image_url';
-        text?: string;
-        image_url?: {
-            url: string;
-            detail?: 'low' | 'high' | 'auto';
-        };
-    }>;
-    name?: string;
-    tool_calls?: ToolCall[];
-    tool_call_id?: string;
-}
+// 🎨 用于多模态的增强消息类型（复用 OpenAIMessage，避免重复定义）
+export type EnhancedMessage = OpenAIMessage;
 
 // 🛠️ 函数/工具调用支持
-export interface ToolCall {
-    id: string;
-    type: 'function';
-    function: {
-        name: string;
-        arguments: string;
-    };
-}
+export type ToolCall = OpenAIToolCall;
 
 export interface FunctionDefinition {
     name: string;

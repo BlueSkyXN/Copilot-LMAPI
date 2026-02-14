@@ -7,9 +7,15 @@
 import { 
     EnhancedMessage, 
     ModelCapabilities, 
-    FunctionDefinition 
+    FunctionDefinition,
+    ToolCall
 } from '../types/ModelCapabilities';
-import { ValidatedRequest } from '../types/OpenAI';
+import {
+    OpenAIFunctionCallChoice,
+    OpenAITool,
+    OpenAIToolChoice,
+    ValidatedRequest
+} from '../types/OpenAI';
 import { LIMITS, ERROR_CODES } from '../constants/Config';
 import { logger } from './Logger';
 
@@ -51,20 +57,30 @@ export class Validator {
         const presencePenalty = this.validatePenalty(request.presence_penalty, 'presence_penalty');
         const frequencyPenalty = this.validatePenalty(request.frequency_penalty, 'frequency_penalty');
         
-        // 如果存在则验证函数
-        if (request.functions) {
-            this.validateFunctions(request.functions);
+        const validatedFunctions = request.functions ? this.validateFunctions(request.functions) : undefined;
+        const validatedTools = request.tools ? this.validateTools(request.tools) : undefined;
+        const availableToolNames = [
+            ...(validatedFunctions || []).map(func => func.name),
+            ...(validatedTools || []).map(tool => tool.function.name)
+        ];
+        if (request.function_call !== undefined && request.tool_choice !== undefined) {
+            throw new ValidationError(
+                'function_call and tool_choice cannot be used together',
+                ERROR_CODES.INVALID_REQUEST,
+                'tool_choice'
+            );
         }
-        
-        // 如果存在则验证工具
-        if (request.tools) {
-            this.validateTools(request.tools);
-        }
+        const validatedFunctionCall = request.function_call !== undefined
+            ? this.validateFunctionCallChoice(request.function_call, availableToolNames)
+            : undefined;
+        const validatedToolChoice = request.tool_choice !== undefined
+            ? this.validateToolChoice(request.tool_choice, availableToolNames)
+            : undefined;
         
         // 构建已验证的请求
         const validatedRequest: ValidatedRequest = {
             model,
-            messages: messages as any, // Type conversion for enhanced messages
+            messages,
             stream,
             temperature,
         };
@@ -91,11 +107,17 @@ export class Validator {
         if (request.user) {
             validatedRequest.user = this.validateUser(request.user);
         }
-        if (request.functions) {
-            validatedRequest.functions = request.functions;
+        if (validatedFunctions) {
+            validatedRequest.functions = validatedFunctions;
         }
-        if (request.tools) {
-            validatedRequest.tools = request.tools;
+        if (validatedTools) {
+            validatedRequest.tools = validatedTools;
+        }
+        if (validatedFunctionCall !== undefined) {
+            validatedRequest.function_call = validatedFunctionCall;
+        }
+        if (validatedToolChoice !== undefined) {
+            validatedRequest.tool_choice = validatedToolChoice;
         }
         
         return validatedRequest;
@@ -137,25 +159,19 @@ export class Validator {
         }
         
         // 验证角色
-        if (!['system', 'user', 'assistant'].includes(message.role)) {
+        if (!['system', 'user', 'assistant', 'tool', 'function'].includes(message.role)) {
             throw new ValidationError(
-                `Invalid role "${message.role}" at message ${index}. Must be 'system', 'user', or 'assistant'`,
+                `Invalid role "${message.role}" at message ${index}. Must be 'system', 'user', 'assistant', 'tool', or 'function'`,
                 ERROR_CODES.INVALID_REQUEST,
                 `messages.${index}.role`
             );
         }
         
-        // 验证内容（可以是字符串或多模态数组）
+        const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+        const hasFunctionCall = !!message.function_call;
+
+        // 验证内容（可以是字符串、null 或多模态数组）
         if (typeof message.content === 'string') {
-            // 简单文本内容
-            if (message.content.length === 0) {
-                throw new ValidationError(
-                    `Message content at index ${index} cannot be empty`,
-                    ERROR_CODES.INVALID_REQUEST,
-                    `messages.${index}.content`
-                );
-            }
-            
             if (message.content.length > LIMITS.MAX_MESSAGE_LENGTH) {
                 throw new ValidationError(
                     `Message content at index ${index} is too long. Maximum ${LIMITS.MAX_MESSAGE_LENGTH} characters allowed`,
@@ -163,14 +179,35 @@ export class Validator {
                     `messages.${index}.content`
                 );
             }
-            
+
+            if (message.role !== 'tool' && message.role !== 'function' && !hasToolCalls && !hasFunctionCall && message.content.length === 0) {
+                throw new ValidationError(
+                    `Message content at index ${index} cannot be empty`,
+                    ERROR_CODES.INVALID_REQUEST,
+                    `messages.${index}.content`
+                );
+            }
+        } else if (message.role === 'function') {
+            throw new ValidationError(
+                `Function message content at index ${index} must be a string`,
+                ERROR_CODES.INVALID_REQUEST,
+                `messages.${index}.content`
+            );
+        } else if (message.content === null) {
+            if (message.role !== 'assistant' || (!hasToolCalls && !hasFunctionCall)) {
+                throw new ValidationError(
+                    `Null content at index ${index} is only valid for assistant tool call messages`,
+                    ERROR_CODES.INVALID_REQUEST,
+                    `messages.${index}.content`
+                );
+            }
         } else if (Array.isArray(message.content)) {
             // 🎨 多模态内容验证
             this.validateMultimodalContent(message.content, index);
             
         } else {
             throw new ValidationError(
-                `Message content at index ${index} must be a string or array`,
+                `Message content at index ${index} must be a string, null, or array`,
                 ERROR_CODES.INVALID_REQUEST,
                 `messages.${index}.content`
             );
@@ -185,12 +222,56 @@ export class Validator {
         if (message.name && typeof message.name === 'string') {
             validatedMessage.name = message.name;
         }
-        
-        if (message.tool_calls && Array.isArray(message.tool_calls)) {
-            validatedMessage.tool_calls = message.tool_calls;
+
+        if (message.role === 'function') {
+            if (!message.name || typeof message.name !== 'string') {
+                throw new ValidationError(
+                    `Function message at index ${index} must include function name`,
+                    ERROR_CODES.INVALID_REQUEST,
+                    `messages.${index}.name`
+                );
+            }
         }
         
-        if (message.tool_call_id && typeof message.tool_call_id === 'string') {
+        if (message.tool_calls !== undefined) {
+            if (message.role !== 'assistant') {
+                throw new ValidationError(
+                    `tool_calls is only valid for assistant messages at index ${index}`,
+                    ERROR_CODES.INVALID_REQUEST,
+                    `messages.${index}.tool_calls`
+                );
+            }
+            validatedMessage.tool_calls = this.validateToolCalls(message.tool_calls, index);
+        }
+
+        if (message.function_call !== undefined) {
+            if (message.role !== 'assistant') {
+                throw new ValidationError(
+                    `function_call is only valid for assistant messages at index ${index}`,
+                    ERROR_CODES.INVALID_REQUEST,
+                    `messages.${index}.function_call`
+                );
+            }
+            validatedMessage.function_call = this.validateMessageFunctionCall(message.function_call, index);
+        }
+        if (validatedMessage.tool_calls && validatedMessage.function_call) {
+            throw new ValidationError(
+                `Message at index ${index} cannot contain both tool_calls and function_call`,
+                ERROR_CODES.INVALID_REQUEST,
+                `messages.${index}`
+            );
+        }
+        
+        if (message.role === 'tool') {
+            if (!message.tool_call_id || typeof message.tool_call_id !== 'string') {
+                throw new ValidationError(
+                    `Tool message at index ${index} must include tool_call_id`,
+                    ERROR_CODES.INVALID_REQUEST,
+                    `messages.${index}.tool_call_id`
+                );
+            }
+            validatedMessage.tool_call_id = message.tool_call_id;
+        } else if (message.tool_call_id && typeof message.tool_call_id === 'string') {
             validatedMessage.tool_call_id = message.tool_call_id;
         }
         
@@ -332,34 +413,34 @@ export class Validator {
             throw new ValidationError('Functions must be an array', ERROR_CODES.INVALID_REQUEST, 'functions');
         }
         
-        return functions.map((func, index) => this.validateFunction(func, index));
+        return functions.map((func, index) => this.validateFunction(func, `functions.${index}`));
     }
     
     /**
      * 🛠️ 验证单个函数定义
      */
-    private static validateFunction(func: any, index: number): FunctionDefinition {
+    private static validateFunction(func: any, path: string): FunctionDefinition {
         if (!func || typeof func !== 'object') {
             throw new ValidationError(
-                `Function at index ${index} must be an object`,
+                `Function at ${path} must be an object`,
                 ERROR_CODES.INVALID_REQUEST,
-                `functions.${index}`
+                path
             );
         }
         
         if (!func.name || typeof func.name !== 'string') {
             throw new ValidationError(
-                `Function name at index ${index} is required`,
+                `Function name at ${path} is required`,
                 ERROR_CODES.INVALID_REQUEST,
-                `functions.${index}.name`
+                `${path}.name`
             );
         }
         
         if (func.parameters && typeof func.parameters !== 'object') {
             throw new ValidationError(
-                `Function parameters at index ${index} must be an object`,
+                `Function parameters at ${path} must be an object`,
                 ERROR_CODES.INVALID_REQUEST,
-                `functions.${index}.parameters`
+                `${path}.parameters`
             );
         }
         
@@ -373,12 +454,12 @@ export class Validator {
     /**
      * 🛠️ 验证工具数组
      */
-    private static validateTools(tools: any): any[] {
+    private static validateTools(tools: any): OpenAITool[] {
         if (!Array.isArray(tools)) {
             throw new ValidationError('Tools must be an array', ERROR_CODES.INVALID_REQUEST, 'tools');
         }
         
-        return tools.map((tool, index) => {
+        return tools.map((tool, index): OpenAITool => {
             if (!tool || typeof tool !== 'object') {
                 throw new ValidationError(
                     `Tool at index ${index} must be an object`,
@@ -386,9 +467,180 @@ export class Validator {
                     `tools.${index}`
                 );
             }
-            
-            return tool;
+
+            if (tool.type !== 'function') {
+                throw new ValidationError(
+                    `Tool type at index ${index} must be "function"`,
+                    ERROR_CODES.INVALID_REQUEST,
+                    `tools.${index}.type`
+                );
+            }
+
+            const validatedFunction = this.validateFunction(tool.function, `tools.${index}.function`);
+            return {
+                type: 'function',
+                function: {
+                    name: validatedFunction.name,
+                    description: validatedFunction.description,
+                    parameters: validatedFunction.parameters
+                }
+            };
         });
+    }
+
+    /**
+     * 🧩 验证消息中的 tool_calls
+     */
+    private static validateToolCalls(toolCalls: any, messageIndex: number): ToolCall[] {
+        if (!Array.isArray(toolCalls)) {
+            throw new ValidationError(
+                `tool_calls at message ${messageIndex} must be an array`,
+                ERROR_CODES.INVALID_REQUEST,
+                `messages.${messageIndex}.tool_calls`
+            );
+        }
+
+        return toolCalls.map((call, callIndex): ToolCall => {
+            const basePath = `messages.${messageIndex}.tool_calls.${callIndex}`;
+            if (!call || typeof call !== 'object') {
+                throw new ValidationError(`Invalid tool call at ${basePath}`, ERROR_CODES.INVALID_REQUEST, basePath);
+            }
+
+            if (!call.id || typeof call.id !== 'string') {
+                throw new ValidationError(`tool call id is required at ${basePath}`, ERROR_CODES.INVALID_REQUEST, `${basePath}.id`);
+            }
+
+            if (call.type !== 'function') {
+                throw new ValidationError(`tool call type must be "function" at ${basePath}`, ERROR_CODES.INVALID_REQUEST, `${basePath}.type`);
+            }
+
+            if (!call.function || typeof call.function !== 'object') {
+                throw new ValidationError(`tool call function is required at ${basePath}`, ERROR_CODES.INVALID_REQUEST, `${basePath}.function`);
+            }
+
+            if (!call.function.name || typeof call.function.name !== 'string') {
+                throw new ValidationError(`tool call function.name is required at ${basePath}`, ERROR_CODES.INVALID_REQUEST, `${basePath}.function.name`);
+            }
+
+            if (typeof call.function.arguments !== 'string') {
+                throw new ValidationError(`tool call function.arguments must be a string at ${basePath}`, ERROR_CODES.INVALID_REQUEST, `${basePath}.function.arguments`);
+            }
+
+            return {
+                id: call.id,
+                type: 'function',
+                function: {
+                    name: call.function.name,
+                    arguments: call.function.arguments
+                }
+            };
+        });
+    }
+
+    /**
+     * 🧩 验证消息中的 legacy function_call
+     */
+    private static validateMessageFunctionCall(functionCall: any, messageIndex: number): { name: string; arguments: string } {
+        const basePath = `messages.${messageIndex}.function_call`;
+        if (!functionCall || typeof functionCall !== 'object') {
+            throw new ValidationError('function_call must be an object', ERROR_CODES.INVALID_REQUEST, basePath);
+        }
+
+        if (!functionCall.name || typeof functionCall.name !== 'string') {
+            throw new ValidationError('function_call.name is required', ERROR_CODES.INVALID_REQUEST, `${basePath}.name`);
+        }
+
+        if (typeof functionCall.arguments !== 'string') {
+            throw new ValidationError('function_call.arguments must be a string', ERROR_CODES.INVALID_REQUEST, `${basePath}.arguments`);
+        }
+
+        return {
+            name: functionCall.name,
+            arguments: functionCall.arguments
+        };
+    }
+
+    /**
+     * 🎯 验证 function_call 选择策略
+     */
+    private static validateFunctionCallChoice(
+        functionCall: any,
+        availableToolNames: string[]
+    ): OpenAIFunctionCallChoice {
+        if (functionCall === 'none' || functionCall === 'auto') {
+            return functionCall;
+        }
+
+        if (availableToolNames.length === 0) {
+            throw new ValidationError(
+                'function_call requires at least one function/tool definition',
+                ERROR_CODES.INVALID_REQUEST,
+                'function_call'
+            );
+        }
+
+        if (!functionCall || typeof functionCall !== 'object' || typeof functionCall.name !== 'string') {
+            throw new ValidationError('function_call must be "none", "auto", or { name }', ERROR_CODES.INVALID_REQUEST, 'function_call');
+        }
+
+        if (availableToolNames.length > 0 && !availableToolNames.includes(functionCall.name)) {
+            throw new ValidationError(
+                `function_call requested unknown function "${functionCall.name}"`,
+                ERROR_CODES.INVALID_REQUEST,
+                'function_call.name'
+            );
+        }
+
+        return { name: functionCall.name };
+    }
+
+    /**
+     * 🎯 验证 tool_choice 选择策略
+     */
+    private static validateToolChoice(
+        toolChoice: any,
+        availableToolNames: string[]
+    ): OpenAIToolChoice {
+        if (availableToolNames.length === 0 && toolChoice !== 'none') {
+            throw new ValidationError(
+                'tool_choice requires at least one function/tool definition',
+                ERROR_CODES.INVALID_REQUEST,
+                'tool_choice'
+            );
+        }
+
+        if (toolChoice === 'none' || toolChoice === 'auto' || toolChoice === 'required') {
+            return toolChoice;
+        }
+
+        if (
+            !toolChoice ||
+            typeof toolChoice !== 'object' ||
+            toolChoice.type !== 'function' ||
+            !toolChoice.function ||
+            typeof toolChoice.function.name !== 'string'
+        ) {
+            throw new ValidationError(
+                'tool_choice must be "none", "auto", "required", or { type: "function", function: { name } }',
+                ERROR_CODES.INVALID_REQUEST,
+                'tool_choice'
+            );
+        }
+
+        if (availableToolNames.length > 0 && !availableToolNames.includes(toolChoice.function.name)) {
+            throw new ValidationError(
+                `tool_choice requested unknown function "${toolChoice.function.name}"`,
+                ERROR_CODES.INVALID_REQUEST,
+                'tool_choice.function.name'
+            );
+        }
+
+        return {
+            type: 'function',
+            function: {
+                name: toolChoice.function.name
+            }
+        };
     }
     
     /**

@@ -143,3 +143,4 @@ vite.config.ts.timestamp-*
 CLAUDE.md
 docs/PLAN.md
 AGENTS.md
+/local

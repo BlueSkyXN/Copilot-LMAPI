@@ -122,7 +122,6 @@ export class ModelDiscoveryService {
             contextWindow: vsCodeModel.maxInputTokens,
             supportsVision: false,
             supportsTools: false,
-            supportsFunctionCalling: false,
             supportsStreaming: true, // VS Code 模型默认为 true
             supportsMultimodal: false,
             isHealthy: true,
@@ -145,7 +144,6 @@ export class ModelDiscoveryService {
         // 🛠️ 测试工具/函数调用能力
         try {
             capabilities.supportsTools = await this.testToolCapability(vsCodeModel);
-            capabilities.supportsFunctionCalling = capabilities.supportsTools;
         } catch (error) {
             logger.debug(`Tool test failed for ${vsCodeModel.id}:`, { error: String(error) });
         }

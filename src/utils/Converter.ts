@@ -11,16 +11,24 @@ import {
     EnhancedMessage, 
     ModelCapabilities, 
     EnhancedRequestContext,
-    ToolCall,
-    FunctionDefinition 
+    ToolCall
 } from '../types/ModelCapabilities';
 import { 
     OpenAICompletionResponse, 
     OpenAIStreamResponse, 
     OpenAIModelsResponse,
-    OpenAIModel
+    OpenAIModel,
+    OpenAIToolCall
 } from '../types/OpenAI';
 import { logger } from './Logger';
+
+interface ToolConversionState {
+    pendingToolCallIdsByName: Map<string, string[]>;
+}
+
+interface StreamExtractionOptions {
+    requiresToolCall?: boolean;
+}
 
 export class Converter {
     
@@ -33,10 +41,13 @@ export class Converter {
         selectedModel: ModelCapabilities
     ): Promise<vscode.LanguageModelChatMessage[]> {
         const vsCodeMessages: vscode.LanguageModelChatMessage[] = [];
+        const conversionState: ToolConversionState = {
+            pendingToolCallIdsByName: new Map()
+        };
         
         for (const message of messages) {
             try {
-                const vsCodeMessage = await this.convertSingleMessage(message, selectedModel);
+                const vsCodeMessage = await this.convertSingleMessage(message, selectedModel, conversionState);
                 if (vsCodeMessage) {
                     vsCodeMessages.push(vsCodeMessage);
                 }
@@ -60,8 +71,16 @@ export class Converter {
      */
     private static async convertSingleMessage(
         message: EnhancedMessage, 
-        selectedModel: ModelCapabilities
+        selectedModel: ModelCapabilities,
+        conversionState: ToolConversionState
     ): Promise<vscode.LanguageModelChatMessage | null> {
+        if (message.role === 'tool' || message.role === 'function') {
+            return this.convertToolResultMessage(message, conversionState);
+        }
+
+        if (message.role === 'assistant' && (message.tool_calls?.length || message.function_call)) {
+            return this.convertAssistantToolCallMessage(message, conversionState);
+        }
         
         // 处理简单文本消息
         if (typeof message.content === 'string') {
@@ -77,6 +96,77 @@ export class Converter {
         }
         
         return null;
+    }
+
+    /**
+     * 🛠️ 转换 assistant 的工具调用消息
+     */
+    private static convertAssistantToolCallMessage(
+        message: EnhancedMessage,
+        conversionState: ToolConversionState
+    ): vscode.LanguageModelChatMessage {
+        const parts: Array<vscode.LanguageModelTextPart | vscode.LanguageModelToolCallPart> = [];
+        const textContent = this.extractTextContent(message);
+
+        if (textContent) {
+            parts.push(new vscode.LanguageModelTextPart(textContent));
+        }
+
+        const toolCalls = message.tool_calls || (message.function_call
+            ? [{
+                id: this.generateLegacyToolCallId(message.function_call.name),
+                type: 'function' as const,
+                function: {
+                    name: message.function_call.name,
+                    arguments: message.function_call.arguments
+                }
+            }]
+            : []);
+
+        for (const toolCall of toolCalls) {
+            this.trackPendingToolCall(toolCall.function.name, toolCall.id, conversionState);
+            parts.push(new vscode.LanguageModelToolCallPart(
+                toolCall.id,
+                toolCall.function.name,
+                this.parseToolArguments(toolCall.function.arguments)
+            ));
+        }
+
+        return new vscode.LanguageModelChatMessage(
+            vscode.LanguageModelChatMessageRole.Assistant,
+            parts
+        );
+    }
+
+    /**
+     * 🛠️ 转换 tool 角色结果消息
+     */
+    private static convertToolResultMessage(
+        message: EnhancedMessage,
+        conversionState: ToolConversionState
+    ): vscode.LanguageModelChatMessage {
+        const callId = message.tool_call_id
+            || (message.role === 'function' && message.name
+                ? this.consumePendingToolCallId(message.name, conversionState)
+                : undefined);
+        const text = this.extractToolResultText(message.content);
+        const content = [new vscode.LanguageModelTextPart(text || '')];
+
+        if (!callId) {
+            logger.warn('工具结果消息缺少 tool_call_id，降级为普通用户消息', {
+                role: message.role,
+                name: message.name
+            });
+            return new vscode.LanguageModelChatMessage(
+                vscode.LanguageModelChatMessageRole.User,
+                text || ''
+            );
+        }
+
+        return new vscode.LanguageModelChatMessage(
+            vscode.LanguageModelChatMessageRole.User,
+            [new vscode.LanguageModelToolResultPart(callId, content)]
+        );
     }
     
     /**
@@ -177,6 +267,121 @@ export class Converter {
             return null;
         }
     }
+
+    /**
+     * 🧾 提取消息中的文本内容
+     */
+    private static extractTextContent(message: EnhancedMessage): string {
+        if (typeof message.content === 'string') {
+            return this.formatRolePrefix(message.role) + message.content;
+        }
+
+        if (!Array.isArray(message.content)) {
+            return '';
+        }
+
+        const textParts = message.content
+            .filter(part => part.type === 'text' && !!part.text)
+            .map(part => part.text || '');
+        const joined = textParts.join('');
+        return joined ? this.formatRolePrefix(message.role) + joined : '';
+    }
+
+    /**
+     * 🧾 提取 tool 结果文本
+     */
+    private static extractToolResultText(content: EnhancedMessage['content']): string {
+        if (typeof content === 'string') {
+            return content;
+        }
+
+        if (!Array.isArray(content)) {
+            return '';
+        }
+
+        return content
+            .filter(part => part.type === 'text' && !!part.text)
+            .map(part => part.text || '')
+            .join('');
+    }
+
+    /**
+     * 🔄 将工具参数字符串解析为对象
+     */
+    private static parseToolArguments(rawArguments: string): object {
+        try {
+            const parsed = JSON.parse(rawArguments);
+            if (parsed && typeof parsed === 'object') {
+                return parsed;
+            }
+            return { value: parsed };
+        } catch {
+            return { __raw: rawArguments };
+        }
+    }
+
+    private static generateLegacyToolCallId(name: string): string {
+        return `call_${name}_${Date.now().toString(36)}`;
+    }
+
+    private static trackPendingToolCall(name: string, callId: string, conversionState: ToolConversionState): void {
+        const pending = conversionState.pendingToolCallIdsByName.get(name) || [];
+        pending.push(callId);
+        conversionState.pendingToolCallIdsByName.set(name, pending);
+    }
+
+    private static consumePendingToolCallId(name: string, conversionState: ToolConversionState): string | undefined {
+        const pending = conversionState.pendingToolCallIdsByName.get(name);
+        if (!pending || pending.length === 0) {
+            return undefined;
+        }
+        const callId = pending.shift();
+        if (pending.length === 0) {
+            conversionState.pendingToolCallIdsByName.delete(name);
+        } else {
+            conversionState.pendingToolCallIdsByName.set(name, pending);
+        }
+        return callId;
+    }
+
+    /**
+     * 🔄 VS Code ToolCallPart -> OpenAI ToolCall
+     */
+    private static convertVSCodeToolCallPart(part: vscode.LanguageModelToolCallPart): ToolCall {
+        return {
+            id: part.callId,
+            type: 'function',
+            function: {
+                name: part.name,
+                arguments: this.stringifyToolInput(part.input)
+            }
+        };
+    }
+
+    private static convertToolCallToOpenAI(toolCall: ToolCall): OpenAIToolCall {
+        return {
+            id: toolCall.id,
+            type: 'function',
+            function: {
+                name: toolCall.function.name,
+                arguments: toolCall.function.arguments
+            }
+        };
+    }
+
+    private static stringifyToolInput(input: object): string {
+        try {
+            return JSON.stringify(input);
+        } catch {
+            return '{}';
+        }
+    }
+
+    private static estimateToolCallTokens(toolCalls: ToolCall[]): number {
+        return toolCalls.reduce((total, call) => {
+            return total + this.estimateTokens(call.function.name + call.function.arguments);
+        }, 0);
+    }
     
     /**
      * 🔄 将 OpenAI 角色映射到 VS Code 角色
@@ -185,6 +390,8 @@ export class Converter {
         switch (role) {
             case 'system':
             case 'user':
+            case 'tool':
+            case 'function':
                 return vscode.LanguageModelChatMessageRole.User;
             case 'assistant':
                 return vscode.LanguageModelChatMessageRole.Assistant;
@@ -201,7 +408,9 @@ export class Converter {
             case 'system':
                 return 'System: ';
             case 'assistant':
-                return 'Assistant: ';
+                return '';
+            case 'tool':
+                return 'Tool: ';
             case 'user':
             default:
                 return '';
@@ -214,9 +423,32 @@ export class Converter {
     public static createCompletionResponse(
         content: string,
         context: EnhancedRequestContext,
-        selectedModel: ModelCapabilities
+        selectedModel: ModelCapabilities,
+        toolCalls: ToolCall[] = [],
+        preferLegacyFunctionCall: boolean = false
     ): OpenAICompletionResponse {
         const now = Math.floor(Date.now() / 1000);
+        const openAIToolCalls = toolCalls.map(call => this.convertToolCallToOpenAI(call));
+        const isToolResponse = openAIToolCalls.length > 0;
+        const useLegacyFunctionCall = preferLegacyFunctionCall && openAIToolCalls.length === 1;
+        const completionTokens = this.estimateTokens(content) + this.estimateToolCallTokens(toolCalls);
+        const finishReason = isToolResponse
+            ? (useLegacyFunctionCall ? 'function_call' : 'tool_calls')
+            : 'stop';
+        const messageContent = content.length > 0 ? content : (isToolResponse ? null : '');
+
+        const message: OpenAICompletionResponse['choices'][0]['message'] = {
+            role: 'assistant',
+            content: messageContent
+        };
+
+        if (isToolResponse) {
+            if (useLegacyFunctionCall && openAIToolCalls[0]) {
+                message.function_call = openAIToolCalls[0].function;
+            } else {
+                message.tool_calls = openAIToolCalls;
+            }
+        }
         
         return {
             id: `chatcmpl-${context.requestId}`,
@@ -225,16 +457,13 @@ export class Converter {
             model: context.model, // 使用请求的模型名称
             choices: [{
                 index: 0,
-                message: {
-                    role: 'assistant',
-                    content: content
-                },
-                finish_reason: 'stop'
+                message,
+                finish_reason: finishReason
             }],
             usage: {
                 prompt_tokens: context.estimatedTokens,
-                completion_tokens: this.estimateTokens(content),
-                total_tokens: context.estimatedTokens + this.estimateTokens(content)
+                completion_tokens: completionTokens,
+                total_tokens: context.estimatedTokens + completionTokens
             },
             system_fingerprint: `vs-code-${selectedModel.vendor}-${selectedModel.family}`
         };
@@ -244,36 +473,25 @@ export class Converter {
      * 🌊 创建增强流式响应块
      */
     public static createStreamChunk(
-        content: string,
         context: EnhancedRequestContext,
         selectedModel: ModelCapabilities,
-        isFirst: boolean = false,
-        isLast: boolean = false
+        delta: OpenAIStreamResponse['choices'][0]['delta'],
+        finishReason: OpenAIStreamResponse['choices'][0]['finish_reason'] = null
     ): OpenAIStreamResponse {
         const now = Math.floor(Date.now() / 1000);
         
-        const chunk: OpenAIStreamResponse = {
+        return {
             id: `chatcmpl-${context.requestId}`,
             object: 'chat.completion.chunk',
             created: now,
             model: context.model, // 使用请求的模型名称
             choices: [{
                 index: 0,
-                delta: {},
-                finish_reason: isLast ? 'stop' : null
+                delta,
+                finish_reason: finishReason
             }],
             system_fingerprint: `vs-code-${selectedModel.vendor}-${selectedModel.family}`
         };
-        
-        if (isFirst) {
-            chunk.choices[0].delta.role = 'assistant';
-        }
-        
-        if (content) {
-            chunk.choices[0].delta.content = content;
-        }
-        
-        return chunk;
     }
     
     /**
@@ -308,6 +526,34 @@ export class Converter {
             data: models
         };
     }
+
+    private static getResponseChunks(
+        response: vscode.LanguageModelChatResponse
+    ): AsyncIterable<vscode.LanguageModelTextPart | vscode.LanguageModelToolCallPart | string | unknown> {
+        const responseWithFallback = response as vscode.LanguageModelChatResponse & {
+            stream?: AsyncIterable<unknown>;
+            text?: AsyncIterable<string> | string;
+        };
+
+        if (responseWithFallback.stream && typeof responseWithFallback.stream[Symbol.asyncIterator] === 'function') {
+            return responseWithFallback.stream;
+        }
+
+        const legacyText = responseWithFallback.text;
+        if (legacyText && typeof (legacyText as AsyncIterable<string>)[Symbol.asyncIterator] === 'function') {
+            return legacyText as AsyncIterable<string>;
+        }
+        if (typeof legacyText === 'string') {
+            const text = legacyText;
+            return (async function* () {
+                if (text) {
+                    yield text;
+                }
+            })();
+        }
+
+        throw new Error('Language model response stream is unavailable');
+    }
     
     /**
      * 🌊 从带有增强上下文的 VS Code LM 响应流中提取内容
@@ -315,31 +561,74 @@ export class Converter {
     public static async *extractStreamContent(
         response: vscode.LanguageModelChatResponse,
         context: EnhancedRequestContext,
-        selectedModel: ModelCapabilities
+        selectedModel: ModelCapabilities,
+        options: StreamExtractionOptions = {}
     ): AsyncGenerator<string> {
-        let isFirst = true;
+        const requiresToolCall = !!options.requiresToolCall;
+        let emittedRole = false;
+        let hasToolCalls = false;
+        let emittedToolCallIndex = 0;
         
         try {
-            for await (const chunk of response.text) {
-                if (chunk) {
+            for await (const chunk of this.getResponseChunks(response)) {
+                const delta: OpenAIStreamResponse['choices'][0]['delta'] = {};
+
+                if (!emittedRole) {
+                    delta.role = 'assistant';
+                    emittedRole = true;
+                }
+
+                if (chunk instanceof vscode.LanguageModelTextPart) {
+                    if (chunk.value) {
+                        delta.content = chunk.value;
+                    }
+                } else if (chunk instanceof vscode.LanguageModelToolCallPart) {
+                    const toolCall = this.convertVSCodeToolCallPart(chunk);
+                    hasToolCalls = true;
+                    delta.tool_calls = [{
+                        index: emittedToolCallIndex,
+                        id: toolCall.id,
+                        type: 'function',
+                        function: {
+                            name: toolCall.function.name,
+                            arguments: toolCall.function.arguments
+                        }
+                    }];
+                    emittedToolCallIndex++;
+                } else if (typeof chunk === 'string' && chunk) {
+                    delta.content = chunk;
+                }
+
+                if (Object.keys(delta).length > 0) {
                     yield this.createSSEEvent('data', this.createStreamChunk(
-                        chunk,
                         context,
                         selectedModel,
-                        isFirst,
-                        false
+                        delta
                     ));
-                    isFirst = false;
                 }
             }
-            
-            // 发送最终块
+
+            if (!emittedRole) {
+                yield this.createSSEEvent('data', this.createStreamChunk(
+                    context,
+                    selectedModel,
+                    { role: 'assistant' }
+                ));
+            }
+
+            if (requiresToolCall && !hasToolCalls) {
+                throw new Error('Model did not produce any tool calls despite required tool mode');
+            }
+
+            const finishReason: OpenAIStreamResponse['choices'][0]['finish_reason'] = hasToolCalls
+                ? 'tool_calls'
+                : 'stop';
+
             yield this.createSSEEvent('data', this.createStreamChunk(
-                '',
                 context,
                 selectedModel,
-                false,
-                true
+                {},
+                finishReason
             ));
             
             // 发送完成信号
@@ -347,10 +636,7 @@ export class Converter {
             
         } catch (error) {
             logger.error('增强流提取中出错', error as Error, {}, context.requestId);
-            yield this.createSSEEvent('error', {
-                message: '增强流处理错误',
-                type: 'api_error'
-            });
+            throw error;
         }
     }
     
@@ -359,19 +645,26 @@ export class Converter {
      */
     public static async collectFullResponse(
         response: vscode.LanguageModelChatResponse
-    ): Promise<string> {
+    ): Promise<{ content: string; toolCalls: ToolCall[] }> {
         let fullContent = '';
+        const toolCalls: ToolCall[] = [];
         
         try {
-            for await (const chunk of response.text) {
-                fullContent += chunk;
+            for await (const chunk of this.getResponseChunks(response)) {
+                if (chunk instanceof vscode.LanguageModelTextPart) {
+                    fullContent += chunk.value;
+                } else if (chunk instanceof vscode.LanguageModelToolCallPart) {
+                    toolCalls.push(this.convertVSCodeToolCallPart(chunk));
+                } else if (typeof chunk === 'string') {
+                    fullContent += chunk;
+                }
             }
         } catch (error) {
             logger.error('收集增强响应时出错', error as Error);
             throw new Error('收集响应内容失败');
         }
         
-        return fullContent;
+        return { content: fullContent, toolCalls };
     }
     
     /**
@@ -421,13 +714,17 @@ export class Converter {
         );
         
         const hasFunctions = messages.some(msg => 
-            msg.tool_calls && msg.tool_calls.length > 0
+            (msg.tool_calls && msg.tool_calls.length > 0) ||
+            !!msg.function_call ||
+            !!msg.tool_call_id
         );
         
         // 估算总令牌数
         const estimatedTokens = messages.reduce((total, msg) => {
             if (typeof msg.content === 'string') {
                 return total + this.estimateTokens(msg.content);
+            } else if (msg.content === null) {
+                return total;
             } else if (Array.isArray(msg.content)) {
                 return total + msg.content.reduce((partTotal, part) => {
                     if (part.type === 'text' && part.text) {
@@ -464,51 +761,6 @@ export class Converter {
             estimatedTokens,
             selectedModel
         };
-    }
-    
-    /**
-     * 🧹 解析和增强请求体
-     */
-    public static parseEnhancedRequestBody(body: string): {
-        messages: EnhancedMessage[];
-        model?: string;
-        stream?: boolean;
-        functions?: FunctionDefinition[];
-        tools?: any[];
-        [key: string]: any;
-    } {
-        try {
-            const parsed = JSON.parse(body);
-            
-            // 确保消息具有正确的类型
-            if (parsed.messages && Array.isArray(parsed.messages)) {
-                parsed.messages = parsed.messages.map((msg: any) => {
-                    // 如有需要，将旧式内容转换为新的增强格式
-                    if (typeof msg.content === 'string') {
-                        return msg as EnhancedMessage;
-                    }
-                    
-                    // 处理多模态内容
-                    if (Array.isArray(msg.content)) {
-                        return {
-                            ...msg,
-                            content: msg.content.map((part: any) => {
-                                if (typeof part === 'string') {
-                                    return { type: 'text', text: part };
-                                }
-                                return part;
-                            })
-                        } as EnhancedMessage;
-                    }
-                    
-                    return msg as EnhancedMessage;
-                });
-            }
-            
-            return parsed;
-        } catch (error) {
-            throw new Error('请求体中的 JSON 无效');
-        }
     }
     
     /**

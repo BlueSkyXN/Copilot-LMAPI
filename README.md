@@ -72,10 +72,18 @@ POST /v1/chat/completions
 完全兼容 OpenAI Chat Completions API，包括：
 - 流式和非流式响应
 - 多模态输入（文本 + 图像）
-- 函数/工具调用
+- 函数/工具调用（含多轮 tool_calls 往返）
 - Temperature、top_p、max_tokens 参数
 - 停止序列
 - 存在和频率惩罚
+
+工具调用兼容细节：
+- 支持现代 `tools` + `tool_choice`（`none` / `auto` / `required` / 指定函数）
+- 支持 legacy `functions` + `function_call`
+- 流式响应统一实时返回 `tool_calls` 增量（避免多工具调用丢失）
+- 非流式响应下，legacy `functions` 模式且仅单工具调用时返回 `function_call`
+- 支持继续轮次：可接收 `assistant.tool_calls` 与 `tool` 角色消息（`tool_call_id`）并继续推理
+- 兼容 legacy 续轮：支持 `function` 角色函数结果消息（按函数名关联到前序调用）
 
 #### 模型列表
 ```
