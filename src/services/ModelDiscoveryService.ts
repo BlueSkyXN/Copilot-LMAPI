@@ -164,7 +164,7 @@ export class ModelDiscoveryService {
     private async testVisionCapability(model: vscode.LanguageModelChat): Promise<boolean> {
         try {
             // GPT-4o 和类似模型支持视觉
-            const visionModels = ['gpt-4o', 'gpt-4-turbo', 'claude-3', 'gemini'];
+            const visionModels = ['gpt-4o', 'gpt-4-turbo','gpt-5-mini', 'claude-3', 'gemini'];
             const modelId = model.id.toLowerCase();
             
             return visionModels.some(vm => modelId.includes(vm));

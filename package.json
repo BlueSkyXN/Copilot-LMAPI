@@ -96,6 +96,31 @@
           "minimum": 60000,
           "maximum": 3600000,
           "description": "Model health check interval in milliseconds (default: 10 minutes)"
+        },
+        "copilot-lmapi.allowRemoteImageDownload": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow the bridge to download remote images (http/https) and include them as LanguageModelDataPart. Disabled by default for security."
+        },
+        "copilot-lmapi.maxImageBytes": {
+          "type": "number",
+          "default": 20971520,
+          "minimum": 1024,
+          "maximum": 104857600,
+          "description": "Maximum allowed image size in bytes for automatic downloads (default: 20MB)"
+        },
+        "copilot-lmapi.imageFetchTimeoutMs": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 1000,
+          "maximum": 60000,
+          "description": "Timeout in milliseconds for fetching remote images (default: 5000ms)"
+        },
+        "copilot-lmapi.allowedImageHosts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Optional whitelist of hostnames allowed for remote image downloads. Empty = allow any host when downloads are enabled."
         }
       }
     },
