@@ -568,6 +568,7 @@ export class Converter {
         let emittedRole = false;
         let hasToolCalls = false;
         let emittedToolCallIndex = 0;
+        const pendingEvents: string[] = [];
         
         try {
             for await (const chunk of this.getResponseChunks(response)) {
@@ -600,20 +601,44 @@ export class Converter {
                 }
 
                 if (Object.keys(delta).length > 0) {
-                    yield this.createSSEEvent('data', this.createStreamChunk(
+                    const event = this.createSSEEvent('data', this.createStreamChunk(
                         context,
                         selectedModel,
                         delta
                     ));
+
+                    if (requiresToolCall && !hasToolCalls) {
+                        pendingEvents.push(event);
+                    } else {
+                        if (requiresToolCall && pendingEvents.length > 0) {
+                            for (const pendingEvent of pendingEvents) {
+                                yield pendingEvent;
+                            }
+                            pendingEvents.length = 0;
+                        }
+                        yield event;
+                    }
                 }
             }
 
             if (!emittedRole) {
-                yield this.createSSEEvent('data', this.createStreamChunk(
+                const roleOnlyEvent = this.createSSEEvent('data', this.createStreamChunk(
                     context,
                     selectedModel,
                     { role: 'assistant' }
                 ));
+
+                if (requiresToolCall && !hasToolCalls) {
+                    pendingEvents.push(roleOnlyEvent);
+                } else {
+                    if (requiresToolCall && pendingEvents.length > 0) {
+                        for (const pendingEvent of pendingEvents) {
+                            yield pendingEvent;
+                        }
+                        pendingEvents.length = 0;
+                    }
+                    yield roleOnlyEvent;
+                }
             }
 
             if (requiresToolCall && !hasToolCalls) {
@@ -623,6 +648,13 @@ export class Converter {
             const finishReason: OpenAIStreamResponse['choices'][0]['finish_reason'] = hasToolCalls
                 ? 'tool_calls'
                 : 'stop';
+
+            if (requiresToolCall && pendingEvents.length > 0) {
+                for (const pendingEvent of pendingEvents) {
+                    yield pendingEvent;
+                }
+                pendingEvents.length = 0;
+            }
 
             yield this.createSSEEvent('data', this.createStreamChunk(
                 context,

@@ -143,7 +143,9 @@ export class Validator {
             );
         }
         
-        return messages.map((message, index) => this.validateEnhancedMessage(message, index));
+        const validatedMessages = messages.map((message, index) => this.validateEnhancedMessage(message, index));
+        this.validateToolCallAssociations(validatedMessages);
+        return validatedMessages;
     }
     
     /**
@@ -263,7 +265,7 @@ export class Validator {
         }
         
         if (message.role === 'tool') {
-            if (!message.tool_call_id || typeof message.tool_call_id !== 'string') {
+            if (!message.tool_call_id || typeof message.tool_call_id !== 'string' || message.tool_call_id.trim().length === 0) {
                 throw new ValidationError(
                     `Tool message at index ${index} must include tool_call_id`,
                     ERROR_CODES.INVALID_REQUEST,
@@ -271,11 +273,152 @@ export class Validator {
                 );
             }
             validatedMessage.tool_call_id = message.tool_call_id;
-        } else if (message.tool_call_id && typeof message.tool_call_id === 'string') {
-            validatedMessage.tool_call_id = message.tool_call_id;
+        } else if (message.role === 'function') {
+            if (message.tool_call_id !== undefined) {
+                if (typeof message.tool_call_id !== 'string' || message.tool_call_id.trim().length === 0) {
+                    throw new ValidationError(
+                        `Function message tool_call_id at index ${index} must be a non-empty string`,
+                        ERROR_CODES.INVALID_REQUEST,
+                        `messages.${index}.tool_call_id`
+                    );
+                }
+                validatedMessage.tool_call_id = message.tool_call_id;
+            }
+        } else if (message.tool_call_id !== undefined) {
+            throw new ValidationError(
+                `tool_call_id is only valid for tool/function messages at index ${index}`,
+                ERROR_CODES.INVALID_REQUEST,
+                `messages.${index}.tool_call_id`
+            );
         }
         
         return validatedMessage;
+    }
+
+    /**
+     * 🔗 校验工具调用与结果消息关联关系
+     * - 防止任意/错误 tool_call_id 绑定
+     * - legacy function 无 tool_call_id 时仅允许无歧义关联
+     */
+    private static validateToolCallAssociations(messages: EnhancedMessage[]): void {
+        const pendingByName = new Map<string, Array<{ id?: string; assistantIndex: number }>>();
+        const pendingById = new Map<string, { name: string; assistantIndex: number }>();
+
+        const addPending = (name: string, assistantIndex: number, id?: string) => {
+            const pending = pendingByName.get(name) || [];
+            pending.push({ id, assistantIndex });
+            pendingByName.set(name, pending);
+
+            if (id) {
+                if (pendingById.has(id)) {
+                    throw new ValidationError(
+                        `Duplicate tool call id "${id}" found in assistant messages`,
+                        ERROR_CODES.INVALID_REQUEST,
+                        `messages.${assistantIndex}.tool_calls`
+                    );
+                }
+                pendingById.set(id, { name, assistantIndex });
+            }
+        };
+
+        const removePendingByNameEntry = (name: string, matcher: (entry: { id?: string; assistantIndex: number }) => boolean) => {
+            const pending = pendingByName.get(name);
+            if (!pending || pending.length === 0) {
+                return;
+            }
+
+            const index = pending.findIndex(matcher);
+            if (index === -1) {
+                return;
+            }
+
+            pending.splice(index, 1);
+            if (pending.length === 0) {
+                pendingByName.delete(name);
+            } else {
+                pendingByName.set(name, pending);
+            }
+        };
+
+        const consumeById = (toolCallId: string, messageIndex: number, paramPath: string, expectedName?: string) => {
+            const pending = pendingById.get(toolCallId);
+            if (!pending) {
+                throw new ValidationError(
+                    `No matching assistant tool call found for tool_call_id "${toolCallId}" at message ${messageIndex}`,
+                    ERROR_CODES.INVALID_REQUEST,
+                    paramPath
+                );
+            }
+
+            if (expectedName && pending.name !== expectedName) {
+                throw new ValidationError(
+                    `tool_call_id "${toolCallId}" maps to function "${pending.name}" but message ${messageIndex} declares name "${expectedName}"`,
+                    ERROR_CODES.INVALID_REQUEST,
+                    paramPath
+                );
+            }
+
+            pendingById.delete(toolCallId);
+            removePendingByNameEntry(pending.name, entry => entry.id === toolCallId);
+        };
+
+        const consumeLegacyByName = (name: string, messageIndex: number, paramPath: string) => {
+            const pending = pendingByName.get(name) || [];
+
+            if (pending.length === 0) {
+                throw new ValidationError(
+                    `Function message at index ${messageIndex} has no matching prior assistant tool/function call for name "${name}"`,
+                    ERROR_CODES.INVALID_REQUEST,
+                    paramPath
+                );
+            }
+
+            if (pending.length > 1) {
+                throw new ValidationError(
+                    `Function message at index ${messageIndex} is ambiguous for name "${name}". Please provide explicit tool_call_id.`,
+                    ERROR_CODES.INVALID_REQUEST,
+                    `messages.${messageIndex}.tool_call_id`
+                );
+            }
+
+            const matched = pending[0];
+            if (matched.id) {
+                pendingById.delete(matched.id);
+            }
+            removePendingByNameEntry(name, entry => entry === matched);
+        };
+
+        messages.forEach((message, index) => {
+            if (message.role === 'assistant') {
+                for (const call of message.tool_calls || []) {
+                    addPending(call.function.name, index, call.id);
+                }
+
+                if (message.function_call) {
+                    addPending(message.function_call.name, index);
+                }
+                return;
+            }
+
+            if (message.role === 'tool' && message.tool_call_id) {
+                consumeById(message.tool_call_id, index, `messages.${index}.tool_call_id`);
+                return;
+            }
+
+            if (message.role === 'function') {
+                const functionName = message.name as string;
+                if (message.tool_call_id) {
+                    consumeById(
+                        message.tool_call_id,
+                        index,
+                        `messages.${index}.tool_call_id`,
+                        functionName
+                    );
+                } else {
+                    consumeLegacyByName(functionName, index, `messages.${index}.name`);
+                }
+            }
+        });
     }
     
     /**

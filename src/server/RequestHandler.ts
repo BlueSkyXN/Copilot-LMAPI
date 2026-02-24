@@ -552,8 +552,6 @@ export class RequestHandler {
         requiresToolCall: boolean,
         requiredModeParam: string
     ): Promise<void> {
-        res.writeHead(HTTP_STATUS.OK, SSE_HEADERS);
-        
         try {
             requestLogger.info('🌊 Starting enhanced streaming response...');
             
@@ -567,6 +565,9 @@ export class RequestHandler {
                     requiresToolCall
                 }
             )) {
+                if (!res.headersSent) {
+                    res.writeHead(HTTP_STATUS.OK, SSE_HEADERS);
+                }
                 res.write(chunk);
                 chunkCount++;
             }
@@ -577,12 +578,35 @@ export class RequestHandler {
             requestLogger.error('❌ Enhanced streaming error:', error);
             const errorText = this.stringifyError(error);
             if (requiresToolCall && errorText.includes('required tool mode')) {
+                if (!res.headersSent) {
+                    this.sendErrorResponse(
+                        res,
+                        HTTP_STATUS.BAD_REQUEST,
+                        'Model did not produce any tool calls despite required mode',
+                        ERROR_CODES.INVALID_REQUEST,
+                        context.requestId,
+                        requiredModeParam
+                    );
+                    return;
+                }
+
                 const errorEvent = Converter.createSSEEvent('error', {
                     message: 'Model did not produce any tool calls despite required mode',
                     type: ERROR_CODES.INVALID_REQUEST,
                     param: requiredModeParam
                 });
                 res.write(errorEvent);
+                return;
+            }
+
+            if (!res.headersSent) {
+                this.sendErrorResponse(
+                    res,
+                    HTTP_STATUS.BAD_GATEWAY,
+                    'Enhanced stream processing error',
+                    ERROR_CODES.API_ERROR,
+                    context.requestId
+                );
                 return;
             }
             
@@ -592,7 +616,9 @@ export class RequestHandler {
             });
             res.write(errorEvent);
         } finally {
-            res.end();
+            if (!res.writableEnded) {
+                res.end();
+            }
         }
     }
     
