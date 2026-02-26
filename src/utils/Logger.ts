@@ -7,6 +7,13 @@ import * as vscode from 'vscode';
 import { LogEntry } from '../types/VSCode';
 import { LOG_LEVELS, CONFIG_SECTION } from '../constants/Config';
 
+export interface RequestLogger {
+    debug: (message: string, context?: Record<string, any>) => void;
+    info: (message: string, context?: Record<string, any>) => void;
+    warn: (message: string, context?: Record<string, any>) => void;
+    error: (message: string, error?: Error, context?: Record<string, any>) => void;
+}
+
 export class Logger {
     private outputChannel: vscode.OutputChannel;
     private isLoggingEnabled: boolean = true;
@@ -44,9 +51,10 @@ export class Logger {
             requestId
         };
 
-        // 添加到内存存储
+        // 添加到内存存储（超过 120% 阈值时裁剪，减少频繁分配）
         this.logEntries.push(logEntry);
-        if (this.logEntries.length > this.maxLogEntries) {
+        const trimThreshold = Math.ceil(this.maxLogEntries * 1.2);
+        if (this.logEntries.length > trimThreshold) {
             this.logEntries = this.logEntries.slice(-this.maxLogEntries);
         }
 
@@ -130,7 +138,7 @@ export class Logger {
     }
 
     // 创建请求范围的日志记录器
-    public createRequestLogger(requestId: string) {
+    public createRequestLogger(requestId: string): RequestLogger {
         return {
             debug: (message: string, context?: Record<string, any>) => 
                 this.debug(message, context, requestId),

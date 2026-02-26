@@ -500,20 +500,17 @@ export class Validator {
      * 🖼️ 验证图像 URL 格式
      */
     private static validateImageUrl(url: string, messageIndex: number, partIndex: number): void {
-        // 支持各种图像源
+        // 仅支持 base64 和 HTTP(S) URL（移除 file:// 和本地路径以防止 SSRF）
         const validPatterns = [
             /^data:image\/(jpeg|jpg|png|gif|webp);base64,/, // Base64
-            /^https?:\/\/.+\.(jpeg|jpg|png|gif|webp)$/i,   // HTTP URLs
-            /^file:\/\/.+\.(jpeg|jpg|png|gif|webp)$/i,     // File URLs
-            /^\/.+\.(jpeg|jpg|png|gif|webp)$/i,           // Absolute paths
-            /^\.\/.+\.(jpeg|jpg|png|gif|webp)$/i,         // Relative paths
+            /^https?:\/\/.+/i,                              // HTTP/HTTPS URLs（不限扩展名）
         ];
-        
+
         const isValid = validPatterns.some(pattern => pattern.test(url));
-        
+
         if (!isValid) {
             throw new ValidationError(
-                `Invalid image URL format at message ${messageIndex}, part ${partIndex}. Supported: base64, HTTP URLs, file paths`,
+                `Invalid image URL format at message ${messageIndex}, part ${partIndex}. Supported: base64 data URI, HTTP/HTTPS URLs`,
                 ERROR_CODES.INVALID_REQUEST,
                 `messages.${messageIndex}.content.${partIndex}.image_url.url`
             );

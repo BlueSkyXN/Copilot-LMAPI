@@ -1,13 +1,12 @@
 /**
- * 🚀 革命性请求处理器
- * ✨ 完全重写，无硬编码限制！
- * 🎨 完整的多模态、函数调用和动态模型支持
+ * 请求处理器
+ * 多模态、函数调用和动态模型支持
  */
 
 import * as http from 'http';
 import * as vscode from 'vscode';
 
-import { logger } from '../utils/Logger';
+import { logger, RequestLogger } from '../utils/Logger';
 import { Converter } from '../utils/Converter';
 import { Validator, ValidationError } from '../utils/Validator';
 import { ModelDiscoveryService } from '../services/ModelDiscoveryService';
@@ -21,64 +20,59 @@ import {
 import { OpenAITool, ValidatedRequest } from '../types/OpenAI';
 
 import { ServerState } from '../types/VSCode';
-import { 
+import {
     LIMITS,
-    HTTP_STATUS, 
-    CONTENT_TYPES, 
-    SSE_HEADERS,
+    HTTP_STATUS,
+    CONTENT_TYPES,
     ERROR_CODES,
-    NOTIFICATIONS
+    NOTIFICATIONS,
+    getSSEHeaders
 } from '../constants/Config';
 
 export class RequestHandler {
     private modelDiscovery: ModelDiscoveryService;
     private functionService: FunctionCallService;
     private isInitialized: boolean = false;
-    
-    constructor() {
-        this.modelDiscovery = new ModelDiscoveryService();
+    private copilotAccessCache: { result: boolean; expiry: number } | null = null;
+    private static readonly COPILOT_ACCESS_SUCCESS_CACHE_TTL = 60_000; // 60 seconds
+    private static readonly COPILOT_ACCESS_FAILURE_CACHE_TTL = 10_000; // 10 seconds
+
+    constructor(modelDiscovery: ModelDiscoveryService) {
+        this.modelDiscovery = modelDiscovery;
         this.functionService = new FunctionCallService();
-        
-        // 异步初始化
-        this.initialize();
     }
-    
+
     /**
-     * 🚀 初始化处理器
+     * 初始化处理器（由 CopilotServer.start() 显式调用）
      */
-    private async initialize(): Promise<void> {
+    public async initialize(): Promise<void> {
+        if (this.isInitialized) {
+            return;
+        }
         try {
-            logger.info('🚀 Initializing Enhanced Request Handler...');
-            
-            // 发现所有可用模型
-            await this.modelDiscovery.discoverAllModels();
-            
+            logger.info('Initializing Request Handler...');
             this.isInitialized = true;
-            logger.info('✅ Enhanced Request Handler initialized successfully!');
-            
+            logger.info('Request Handler initialized successfully');
         } catch (error) {
-            logger.error('❌ Failed to initialize Enhanced Request Handler:', error as Error);
+            logger.error('Failed to initialize Request Handler:', error as Error);
+            throw error;
         }
     }
     
     /**
-     * 🎨 处理聊天完成，具备完整多模态支持
+     * 处理聊天完成，具备完整多模态支持
      */
     public async handleChatCompletions(
         req: http.IncomingMessage,
         res: http.ServerResponse,
-        requestId: string
+        requestId: string,
+        serverCancellationToken?: vscode.CancellationToken
     ): Promise<void> {
         const requestLogger = logger.createRequestLogger(requestId);
         const startTime = Date.now();
         
         try {
-            // 确保我们已初始化
-            if (!this.isInitialized) {
-                await this.initialize();
-            }
-            
-            requestLogger.info('🚀 Processing enhanced chat completion request');
+            requestLogger.info('Processing chat completion request');
             
             // 读取并解析请求体并验证
             let body: string;
@@ -171,7 +165,7 @@ export class RequestHandler {
             const requiresToolCall = this.isRequiredToolMode(toolChoice, functionCall);
             const requiredModeParam = toolChoice !== undefined ? 'tool_choice' : 'function_call';
             
-            requestLogger.info('📋 Request analysis:', {
+            requestLogger.info('Request analysis:', {
                 model: requestedModel,
                 stream: isStream,
                 messageCount: messages.length,
@@ -191,7 +185,7 @@ export class RequestHandler {
                 req.headers['user-agent']
             );
             
-            // 🎯 仅允许直接使用请求的模型（完全移除自动选择）
+            // 仅允许直接使用请求的模型（完全移除自动选择）
             let selectedModel: ModelCapabilities | null = this.modelDiscovery.getModel(requestedModel) || null;
             if (!selectedModel) {
                 // 如果找不到模型，尝试重新发现模型
@@ -214,7 +208,7 @@ export class RequestHandler {
             context.selectedModel = selectedModel;
             
             // 始终 direct：日志清晰表明使用请求的模型
-            requestLogger.info('✅ Model direct:', {
+            requestLogger.info('Model direct:', {
                 model: requestedModel,
                 vendor: selectedModel.vendor,
                 family: selectedModel.family,
@@ -267,7 +261,7 @@ export class RequestHandler {
                     );
                     vsCodeTools = toolConfig.tools;
                     toolMode = toolConfig.toolMode;
-                    requestLogger.info(`🛠️ Prepared ${vsCodeTools.length} tools for LM request`, {
+                    requestLogger.info(`Prepared ${vsCodeTools.length} tools for LM request`, {
                         toolMode,
                         requestedTools: tools.length,
                         requestedFunctions: functions.length
@@ -296,9 +290,9 @@ export class RequestHandler {
                 });
             }
             
-            // 🚀 向 VS CODE LM API 发送请求
+            // 向 VS CODE LM API 发送请求
             try {
-                requestLogger.info('📨 Sending request to VS Code LM API...');
+                requestLogger.info('Sending request to VS Code LM API...');
                 
                 const requestOptions: vscode.LanguageModelChatRequestOptions = {};
                 if (vsCodeTools.length > 0) {
@@ -308,18 +302,30 @@ export class RequestHandler {
                     requestOptions.toolMode = toolMode;
                 }
                 const requestCancellation = new vscode.CancellationTokenSource();
-                const cancelOnAborted = () => {
+                let serverCancellationSubscription: vscode.Disposable | undefined;
+                const cancelRequest = (reason: string) => {
                     if (!requestCancellation.token.isCancellationRequested) {
-                        requestLogger.warn('Client request aborted, cancelling LM request');
+                        requestLogger.warn(reason);
                         requestCancellation.cancel();
                     }
+                };
+                const cancelOnAborted = () => {
+                    cancelRequest('Client request aborted, cancelling LM request');
                 };
                 const cancelOnClose = () => {
-                    if (!res.writableEnded && !requestCancellation.token.isCancellationRequested) {
-                        requestLogger.warn('Client connection closed, cancelling LM request');
-                        requestCancellation.cancel();
+                    if (!res.writableEnded) {
+                        cancelRequest('Client connection closed, cancelling LM request');
                     }
                 };
+                if (serverCancellationToken) {
+                    if (serverCancellationToken.isCancellationRequested) {
+                        cancelRequest('Server cancellation requested, cancelling LM request');
+                    } else {
+                        serverCancellationSubscription = serverCancellationToken.onCancellationRequested(() => {
+                            cancelRequest('Server cancellation requested, cancelling LM request');
+                        });
+                    }
+                }
 
                 req.once('aborted', cancelOnAborted);
                 res.once('close', cancelOnClose);
@@ -334,7 +340,7 @@ export class RequestHandler {
                         vsCodeTools.length > 0 && !requiresToolCall
                     );
                     
-                    // 🌊 处理流式与非流式响应
+                    // 处理流式与非流式响应
                     if (isStream) {
                         await this.handleStreamingResponse(
                             response,
@@ -358,11 +364,12 @@ export class RequestHandler {
                 } finally {
                     req.removeListener('aborted', cancelOnAborted);
                     res.removeListener('close', cancelOnClose);
+                    serverCancellationSubscription?.dispose();
                     requestCancellation.dispose();
                 }
                 
             } catch (lmError) {
-                requestLogger.error('❌ VS Code LM API error:', lmError as Error);
+                requestLogger.error('VS Code LM API error:', lmError as Error);
 
                 if (requiresToolCall && vsCodeTools.length > 0 && this.isLikelyToolModeError(lmError)) {
                     this.sendErrorResponse(
@@ -392,13 +399,13 @@ export class RequestHandler {
             
         } catch (error) {
             const duration = Date.now() - startTime;
-            requestLogger.error(`❌ Request failed after ${duration}ms:`, error as Error);
+            requestLogger.error(`Request failed after ${duration}ms:`, error as Error);
             
             if (!res.headersSent) {
                 this.sendErrorResponse(
                     res,
                     HTTP_STATUS.INTERNAL_SERVER_ERROR,
-                    'Enhanced request processing failed',
+                    'Request processing failed',
                     ERROR_CODES.API_ERROR,
                     requestId
                 );
@@ -407,7 +414,7 @@ export class RequestHandler {
     }
     
     /**
-     * 📋 处理增强模型端点
+     * 处理增强模型端点
      */
     public async handleModels(
         req: http.IncomingMessage,
@@ -417,21 +424,16 @@ export class RequestHandler {
         const requestLogger = logger.createRequestLogger(requestId);
         
         try {
-            requestLogger.info('📋 Fetching all available models (no limitations!)...');
-            
-            // 确保我们已初始化
-            if (!this.isInitialized) {
-                await this.initialize();
-            }
+            requestLogger.info('Fetching all available models...');
             
             // 获取所有可用模型
             const allModels = this.modelDiscovery.getAllModels();
             
-            requestLogger.info(`📊 Found ${allModels.length} total models:`);
+            requestLogger.info(`Found ${allModels.length} total models:`);
             
             // 为透明度记录模型能力
             allModels.forEach(model => {
-                requestLogger.info(`  ✨ ${model.id}: tokens=${model.maxInputTokens}, vision=${model.supportsVision}, tools=${model.supportsTools}`);
+                requestLogger.info(`  ${model.id}: tokens=${model.maxInputTokens}, vision=${model.supportsVision}, tools=${model.supportsTools}`);
             });
             
             const modelsResponse = Converter.createModelsResponse(allModels);
@@ -439,10 +441,10 @@ export class RequestHandler {
             res.writeHead(HTTP_STATUS.OK, { 'Content-Type': CONTENT_TYPES.JSON });
             res.end(JSON.stringify(modelsResponse, null, 2));
             
-            requestLogger.info(`✅ Models response sent with ${modelsResponse.data.length} models`);
+            requestLogger.info(`Models response sent with ${modelsResponse.data.length} models`);
             
         } catch (error) {
-            requestLogger.error('❌ Error handling models request:', error as Error);
+            requestLogger.error('Error handling models request:', error as Error);
             this.sendErrorResponse(
                 res,
                 HTTP_STATUS.INTERNAL_SERVER_ERROR,
@@ -454,7 +456,7 @@ export class RequestHandler {
     }
     
     /**
-     * 👩‍⚕️ 增强健康检查
+     * 增强健康检查
      */
     public async handleHealth(
         req: http.IncomingMessage,
@@ -481,7 +483,7 @@ export class RequestHandler {
     }
     
     /**
-     * 📋 增强状态端点
+     * 增强状态端点
      */
     public async handleStatus(
         req: http.IncomingMessage,
@@ -517,8 +519,7 @@ export class RequestHandler {
                     multimodalSupport: true,
                     functionCalling: true,
                     noHardcodedLimitations: true,
-                    autoModelSelection: true,
-                    loadBalancing: true
+                    loadBalancing: false
                 },
                 copilot: {
                     available: await this.checkCopilotAccess(),
@@ -542,40 +543,45 @@ export class RequestHandler {
     }
     
     /**
-     * 🌊 处理增强流式响应
+     * 处理增强流式响应
      */
     private async handleStreamingResponse(
         response: vscode.LanguageModelChatResponse,
         res: http.ServerResponse,
         context: EnhancedRequestContext,
-        requestLogger: any,
+        requestLogger: RequestLogger,
         requiresToolCall: boolean,
         requiredModeParam: string
     ): Promise<void> {
         try {
-            requestLogger.info('🌊 Starting enhanced streaming response...');
-            
+            requestLogger.info('Starting streaming response...');
+
             let chunkCount = 0;
-            
+
             for await (const chunk of Converter.extractStreamContent(
-                response, 
-                context, 
+                response,
+                context,
                 context.selectedModel!,
                 {
                     requiresToolCall
                 }
             )) {
                 if (!res.headersSent) {
-                    res.writeHead(HTTP_STATUS.OK, SSE_HEADERS);
+                    const sseHeaders = getSSEHeaders();
+                    res.setHeader('Content-Type', CONTENT_TYPES.SSE);
+                    res.setHeader('Cache-Control', sseHeaders['Cache-Control']);
+                    res.setHeader('Connection', sseHeaders['Connection']);
+                    res.setHeader('X-Accel-Buffering', sseHeaders['X-Accel-Buffering']);
+                    res.writeHead(HTTP_STATUS.OK);
                 }
                 res.write(chunk);
                 chunkCount++;
             }
             
-            requestLogger.info(`✅ Enhanced streaming completed: ${chunkCount} chunks sent`);
+            requestLogger.info(`Streaming completed: ${chunkCount} chunks sent`);
             
         } catch (error) {
-            requestLogger.error('❌ Enhanced streaming error:', error);
+            requestLogger.error('Streaming error:', error as Error);
             const errorText = this.stringifyError(error);
             if (requiresToolCall && errorText.includes('required tool mode')) {
                 if (!res.headersSent) {
@@ -603,7 +609,7 @@ export class RequestHandler {
                 this.sendErrorResponse(
                     res,
                     HTTP_STATUS.BAD_GATEWAY,
-                    'Enhanced stream processing error',
+                    'Stream processing error',
                     ERROR_CODES.API_ERROR,
                     context.requestId
                 );
@@ -611,7 +617,7 @@ export class RequestHandler {
             }
             
             const errorEvent = Converter.createSSEEvent('error', {
-                message: 'Enhanced stream processing error',
+                message: 'Stream processing error',
                 type: ERROR_CODES.API_ERROR
             });
             res.write(errorEvent);
@@ -623,19 +629,19 @@ export class RequestHandler {
     }
     
     /**
-     * 📋 处理增强非流式响应
+     * 处理增强非流式响应
      */
     private async handleNonStreamingResponse(
         response: vscode.LanguageModelChatResponse,
         res: http.ServerResponse,
         context: EnhancedRequestContext,
-        requestLogger: any,
+        requestLogger: RequestLogger,
         preferLegacyFunctionCall: boolean,
         requiresToolCall: boolean,
         requiredModeParam: string
     ): Promise<void> {
         try {
-            requestLogger.info('📋 Collecting enhanced full response...');
+            requestLogger.info('Collecting full response...');
             
             const fullResponse = await Converter.collectFullResponse(response);
             if (requiresToolCall && fullResponse.toolCalls.length === 0) {
@@ -662,7 +668,7 @@ export class RequestHandler {
             res.writeHead(HTTP_STATUS.OK, { 'Content-Type': CONTENT_TYPES.JSON });
             res.end(JSON.stringify(completionResponse, null, 2));
             
-            requestLogger.info('✅ Enhanced response sent:', {
+            requestLogger.info('Response sent:', {
                 contentLength: fullResponse.content.length,
                 toolCalls: fullResponse.toolCalls.length,
                 tokens: completionResponse.usage.total_tokens,
@@ -670,13 +676,13 @@ export class RequestHandler {
             });
             
         } catch (error) {
-            requestLogger.error('❌ Error collecting enhanced response:', error as Error);
+            requestLogger.error('Error collecting response:', error as Error);
             throw error;
         }
     }
 
     /**
-     * 🧭 是否为强制工具调用语义（不能自动降级）
+     * 是否为强制工具调用语义（不能自动降级）
      */
     private isRequiredToolMode(
         toolChoice: ValidatedRequest['tool_choice'],
@@ -695,14 +701,14 @@ export class RequestHandler {
     }
 
     /**
-     * 🚦 发送请求：工具失败时可选自动降级重试一次
+     * 发送请求：工具失败时可选自动降级重试一次
      */
     private async sendRequestWithToolFallback(
         model: vscode.LanguageModelChat,
         messages: vscode.LanguageModelChatMessage[],
         requestOptions: vscode.LanguageModelChatRequestOptions,
         token: vscode.CancellationToken,
-        requestLogger: any,
+        requestLogger: RequestLogger,
         allowToolFallback: boolean
     ): Promise<vscode.LanguageModelChatResponse> {
         try {
@@ -738,7 +744,7 @@ export class RequestHandler {
     }
 
     /**
-     * 🔍 判断是否是工具模式相关错误（用于控制是否降级）
+     * 判断是否是工具模式相关错误（用于控制是否降级）
      */
     private isLikelyToolModeError(error: unknown): boolean {
         const message = this.stringifyError(error).toLowerCase();
@@ -755,7 +761,7 @@ export class RequestHandler {
     }
 
     /**
-     * 🧾 统一错误文本提取
+     * 统一错误文本提取
      */
     private stringifyError(error: unknown): string {
         if (error instanceof Error) {
@@ -765,20 +771,31 @@ export class RequestHandler {
     }
     
     /**
-     * 🔮 检查 Copilot 访问权限
+     * 检查 Copilot 访问权限（带 TTL 缓存，避免每次请求都调用 API）
      */
     private async checkCopilotAccess(): Promise<boolean> {
+        const now = Date.now();
+        if (this.copilotAccessCache && now < this.copilotAccessCache.expiry) {
+            return this.copilotAccessCache.result;
+        }
+
         try {
             const models = await vscode.lm.selectChatModels({ vendor: 'copilot' });
-            return models.length > 0;
+            const result = models.length > 0;
+            const cacheTtl = result
+                ? RequestHandler.COPILOT_ACCESS_SUCCESS_CACHE_TTL
+                : RequestHandler.COPILOT_ACCESS_FAILURE_CACHE_TTL;
+            this.copilotAccessCache = { result, expiry: now + cacheTtl };
+            return result;
         } catch (error) {
             logger.warn('Copilot access check failed:', { error: String(error) });
+            this.copilotAccessCache = { result: false, expiry: now + RequestHandler.COPILOT_ACCESS_FAILURE_CACHE_TTL };
             return false;
         }
     }
     
     /**
-     * 📋 获取模型总数
+     * 获取模型总数
      */
     private async getModelCount(): Promise<number> {
         try {
@@ -790,7 +807,7 @@ export class RequestHandler {
     }
     
     /**
-     * ❌ 处理 VS Code 语言模型特定错误
+     * 处理 VS Code 语言模型特定错误
      */
     private handleLanguageModelError(
         error: vscode.LanguageModelError,
@@ -833,7 +850,7 @@ export class RequestHandler {
     }
     
     /**
-     * ❌ 发送增强错误响应
+     * 发送增强错误响应
      */
     private sendErrorResponse(
         res: http.ServerResponse,
@@ -857,11 +874,11 @@ export class RequestHandler {
         res.writeHead(statusCode, headers);
         res.end(JSON.stringify(errorResponse, null, 2));
         
-        logger.error(`❌ Enhanced error response: ${statusCode}`, new Error(message), { type, param }, requestId);
+        logger.error(`Error response: ${statusCode}`, new Error(message), { type, param }, requestId);
     }
     
     /**
-     * 📋 读取请求体
+     * 读取请求体
      */
     private async readRequestBody(req: http.IncomingMessage): Promise<string> {
         return new Promise((resolve, reject) => {
@@ -923,7 +940,7 @@ export class RequestHandler {
     }
     
     /**
-     * 📍 获取客户端IP地址
+     * 获取客户端IP地址
      */
     private getClientIP(req: http.IncomingMessage): string {
         return (req.headers['x-forwarded-for'] as string)?.split(',')[0] ||
@@ -932,10 +949,9 @@ export class RequestHandler {
     }
     
     /**
-     * 🧹 清理资源
+     * 清理资源（ModelDiscoveryService 由 CopilotServer 管理，此处不 dispose）
      */
     public dispose(): void {
-        this.modelDiscovery.dispose();
         this.functionService.dispose();
     }
 }

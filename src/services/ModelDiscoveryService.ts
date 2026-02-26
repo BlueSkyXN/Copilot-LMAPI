@@ -1,5 +1,5 @@
 /**
- * 🚀 革命性模型发现服务
+ * 革命性模型发现服务
  * 动态发现、测试和管理所有可用的 VS Code 语言模型
  * 无硬编码限制 - 纯动态智能！
  */
@@ -56,17 +56,18 @@ export class ModelDiscoveryService {
     }
     
     /**
-     * 🔍 发现所有可用模型（无限制！）
+     * 发现所有可用模型（无限制！）
      */
     public async discoverAllModels(): Promise<ModelCapabilities[]> {
-        logger.info('🚀 Starting dynamic model discovery...');
-        
+        logger.info('Starting dynamic model discovery...');
+
         try {
             // 从 VS Code LM API 获取所有模型
             const allModels = await vscode.lm.selectChatModels();
-            logger.info(`📊 Found ${allModels.length} total models`);
+            logger.info(`Found ${allModels.length} total models`);
             
             const discoveredModels: ModelCapabilities[] = [];
+            const nextModelCache = new Map<string, ModelCapabilities>();
             
             // 测试每个模型的能力
             for (const vsCodeModel of allModels) {
@@ -75,7 +76,7 @@ export class ModelDiscoveryService {
                     discoveredModels.push(capabilities);
                     
                     // 缓存模型
-                    this.modelCache.set(capabilities.id, capabilities);
+                    nextModelCache.set(capabilities.id, capabilities);
                     
                     // 初始化指标
                     this.initializeModelMetrics(capabilities.id);
@@ -83,31 +84,32 @@ export class ModelDiscoveryService {
                     // 发出发现事件
                     this.eventEmitter.fire({ type: 'model_discovered', model: capabilities });
                     
-                    logger.info(`✅ Model ${capabilities.id} discovered with capabilities:`, {
+                    logger.info(`Model ${capabilities.id} discovered with capabilities:`, {
                         vision: capabilities.supportsVision,
                         tools: capabilities.supportsTools,
                         tokens: capabilities.maxInputTokens
                     });
                     
                 } catch (error) {
-                    logger.warn(`⚠️ Failed to analyze model ${vsCodeModel.id}:`, { error: String(error) });
+                    logger.warn(`Failed to analyze model ${vsCodeModel.id}:`, { error: String(error) });
                 }
             }
             
             // 更新模型池
             await this.updateModelPool(discoveredModels);
+            this.modelCache = nextModelCache;
             
-            logger.info(`🎉 Discovery complete! Found ${discoveredModels.length} usable models`);
+            logger.info(`Discovery complete! Found ${discoveredModels.length} usable models`);
             return discoveredModels;
-            
+
         } catch (error) {
-            logger.error('❌ Model discovery failed:', error as Error);
+            logger.error('Model discovery failed:', error as Error);
             throw new Error(`Model discovery failed: ${error}`);
         }
     }
     
     /**
-     * 🔬 分析模型能力（魔法发生的地方）
+     * 分析模型能力
      */
     private async analyzeModelCapabilities(vsCodeModel: vscode.LanguageModelChat): Promise<ModelCapabilities> {
         const startTime = Date.now();
@@ -129,7 +131,7 @@ export class ModelDiscoveryService {
             lastTestedAt: new Date()
         };
         
-        // 🔍 测试视觉能力
+        // 测试视觉能力
         try {
             capabilities.supportsVision = await this.testVisionCapability(vsCodeModel);
             if (capabilities.supportsVision) {
@@ -141,76 +143,102 @@ export class ModelDiscoveryService {
             logger.debug(`Vision test failed for ${vsCodeModel.id}:`, { error: String(error) });
         }
         
-        // 🛠️ 测试工具/函数调用能力
+        // 测试工具/函数调用能力
         try {
             capabilities.supportsTools = await this.testToolCapability(vsCodeModel);
         } catch (error) {
             logger.debug(`Tool test failed for ${vsCodeModel.id}:`, { error: String(error) });
         }
         
-        // 📈 测试性能
+        // 测试性能
         const responseTime = Date.now() - startTime;
         capabilities.responseTime = responseTime;
-        
-        // 🧠 智能能力推理
+
+        // 智能能力推理
         this.inferAdvancedCapabilities(capabilities);
         
         return capabilities;
     }
     
     /**
-     * 👁️ 测试模型是否支持视觉/图像
+     * 测试模型是否支持视觉/图像
      */
     private async testVisionCapability(model: vscode.LanguageModelChat): Promise<boolean> {
         try {
-            // GPT-4o 和类似模型支持视觉
-            const visionModels = ['gpt-4o', 'gpt-4-turbo', 'claude-3', 'gemini'];
-            const modelId = model.id.toLowerCase();
-            
-            return visionModels.some(vm => modelId.includes(vm));
+            const probeText = this.getCapabilityProbeText(model);
+            const visionHints = [
+                'vision',
+                'multimodal',
+                'gpt-4o',
+                'gpt-4.1',
+                'gpt-4-turbo',
+                'claude-3',
+                'claude-sonnet-4',
+                'gemini'
+            ];
+            return visionHints.some(hint => probeText.includes(hint));
         } catch (error) {
             return false;
         }
     }
-    
+
     /**
-     * 🛠️ 测试模型是否支持工具/函数调用
+     * 测试模型是否支持工具/函数调用
      */
     private async testToolCapability(model: vscode.LanguageModelChat): Promise<boolean> {
         try {
-            // 大多数现代模型支持工具
-            const toolModels = ['gpt-4', 'gpt-3.5', 'claude-3', 'gemini'];
-            const modelId = model.id.toLowerCase();
-            
-            return toolModels.some(tm => modelId.includes(tm));
+            const probeText = this.getCapabilityProbeText(model);
+            const toolHints = [
+                'gpt-3.5',
+                'gpt-4',
+                'gpt-5',
+                /\bo1\b/,
+                /\bo3\b/,
+                /\bo4\b/,
+                'claude',
+                'gemini',
+                'tool',
+                'function'
+            ];
+            return toolHints.some(hint =>
+                typeof hint === 'string' ? probeText.includes(hint) : hint.test(probeText)
+            );
         } catch (error) {
             return false;
         }
     }
+
+    /**
+     * 归一化能力探测文本，避免单字段误判
+     */
+    private getCapabilityProbeText(model: vscode.LanguageModelChat): string {
+        return [model.id, model.family, model.vendor]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase();
+    }
     
     /**
-     * 🧠 智能能力推理
+     * 智能能力推理
      */
     private inferAdvancedCapabilities(capabilities: ModelCapabilities): void {
-        const modelId = capabilities.id.toLowerCase();
-        
         // 推断最大输出令牌数
-    if (!capabilities.maxOutputTokens) {
+        if (!capabilities.maxOutputTokens) {
             capabilities.maxOutputTokens = Math.min(capabilities.maxInputTokens * 0.5, 4096);
         }
-        
-        // 为已知视觉模型推断图像能力
-    if (capabilities.supportsVision) {
+
+        // 为视觉模型推断图像能力
+        if (capabilities.supportsVision) {
             capabilities.maxImageSize = 20 * 1024 * 1024; // 20MB
         }
-        
+
         // 设置上下文窗口（目前与最大输入相同）
         capabilities.contextWindow = capabilities.maxInputTokens;
     }
     
     
     /**
-     * 📈 计算能力评分用于排名
+     * 计算能力评分用于排名
      */
     private calculateCapabilityScore(model: ModelCapabilities): number {
         let score = 0;
@@ -231,7 +259,7 @@ export class ModelDiscoveryService {
     }
     
     /**
-     * 🔄 更新模型池组织
+     * 更新模型池组织
      */
     private async updateModelPool(models: ModelCapabilities[]): Promise<void> {
         // 重置池
@@ -264,7 +292,7 @@ export class ModelDiscoveryService {
         // 发出池更新事件
         this.eventEmitter.fire({ type: 'pool_refreshed', pool: this.modelPool });
         
-        logger.info(`🎪 Model pool updated:`, {
+        logger.info(`Model pool updated:`, {
             primary: this.modelPool.primary.length,
             secondary: this.modelPool.secondary.length,
             fallback: this.modelPool.fallback.length,
@@ -273,7 +301,7 @@ export class ModelDiscoveryService {
     }
     
     /**
-     * 📊 为模型初始化指标
+     * 为模型初始化指标
      */
     private initializeModelMetrics(modelId: string): void {
         if (!this.modelMetrics.has(modelId)) {
@@ -289,7 +317,7 @@ export class ModelDiscoveryService {
     }
     
     /**
-     * 🔄 启动后台服务
+     * 启动后台服务
      */
     private startBackgroundServices(): void {
         if (this.config.enableCaching) {
@@ -310,10 +338,10 @@ export class ModelDiscoveryService {
     }
     
     /**
-     * 👩‍⚕️ 对所有模型执行健康检查
+     * 对所有模型执行健康检查
      */
     private async performHealthChecks(): Promise<void> {
-        logger.debug('👩‍⚕️ Performing model health checks...');
+        logger.debug('Performing model health checks...');
         
         const allModels = [...this.modelPool.primary, ...this.modelPool.secondary, ...this.modelPool.fallback];
         
@@ -344,28 +372,28 @@ export class ModelDiscoveryService {
     }
     
     /**
-     * 📋 获取当前模型池
+     * 获取当前模型池
      */
     public getModelPool(): ModelPool {
         return { ...this.modelPool };
     }
     
     /**
-     * 📋 按 ID 获取模型
+     * 按 ID 获取模型
      */
     public getModel(modelId: string): ModelCapabilities | undefined {
         return this.modelCache.get(modelId);
     }
     
     /**
-     * 📋 获取所有可用模型
+     * 获取所有可用模型
      */
     public getAllModels(): ModelCapabilities[] {
         return Array.from(this.modelCache.values());
     }
     
     /**
-     * 🧹 清理资源
+     * 清理资源
      */
     public dispose(): void {
         if (this.refreshTimer) {

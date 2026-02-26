@@ -48,24 +48,34 @@ export const CONTENT_TYPES = {
     TEXT: 'text/plain',
 } as const;
 
-export const CORS_HEADERS = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
-    'Access-Control-Max-Age': '86400',
-} as const;
+// CORS 头部：动态生成，仅允许 localhost 来源
+export function getCORSHeaders(origin?: string): Record<string, string> {
+    const allowedOrigin = origin && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+        ? origin
+        : 'http://127.0.0.1';
+    return {
+        'Access-Control-Allow-Origin': allowedOrigin,
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
+        'Access-Control-Max-Age': '86400',
+    };
+}
 
-export const SSE_HEADERS = {
-    ...CORS_HEADERS,
-    'Content-Type': CONTENT_TYPES.SSE,
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive',
-    'X-Accel-Buffering': 'no', // 禁用 nginx 缓冲
-} as const;
+export function getSSEHeaders(origin?: string): Record<string, string> {
+    return {
+        ...getCORSHeaders(origin),
+        'Content-Type': CONTENT_TYPES.SSE,
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no', // 禁用 nginx 缓冲
+    };
+}
 
 export const API_ENDPOINTS = {
     CHAT_COMPLETIONS: '/v1/chat/completions',
     MODELS: '/v1/models',
+    MODELS_REFRESH: '/v1/models/refresh',
+    CAPABILITIES: '/v1/capabilities',
     HEALTH: '/health',
     STATUS: '/status',
 } as const;

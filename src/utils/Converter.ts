@@ -1,18 +1,18 @@
 /**
- * 🎨 增强型多模态转换器
+ * 增强型多模态转换器
  * OpenAI API 与 VS Code LM API 之间的革命性转换
- * ✨ 完全支持图像、函数和动态模型！
+ * 完全支持图像、函数和动态模型！
  */
 
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as path from 'path';
-import { 
-    EnhancedMessage, 
-    ModelCapabilities, 
+import {
+    EnhancedMessage,
+    ModelCapabilities,
     EnhancedRequestContext,
-    ToolCall
+    ToolCall,
+    ModelPool
 } from '../types/ModelCapabilities';
+import { ServerState } from '../types/VSCode';
 import { 
     OpenAICompletionResponse, 
     OpenAIStreamResponse, 
@@ -33,8 +33,8 @@ interface StreamExtractionOptions {
 export class Converter {
     
     /**
-     * 🎨 将增强消息转换为 VS Code LM API 格式
-     * ✨ 支持图像和多模态内容！
+     * 将增强消息转换为 VS Code LM API 格式
+     * 支持图像和多模态内容！
      */
     public static async convertMessagesToVSCode(
         messages: EnhancedMessage[], 
@@ -67,7 +67,7 @@ export class Converter {
     }
     
     /**
-     * 📋 转换单个增强消息
+     * 转换单个增强消息
      */
     private static async convertSingleMessage(
         message: EnhancedMessage, 
@@ -99,7 +99,7 @@ export class Converter {
     }
 
     /**
-     * 🛠️ 转换 assistant 的工具调用消息
+     * 转换 assistant 的工具调用消息
      */
     private static convertAssistantToolCallMessage(
         message: EnhancedMessage,
@@ -139,7 +139,7 @@ export class Converter {
     }
 
     /**
-     * 🛠️ 转换 tool 角色结果消息
+     * 转换 tool 角色结果消息
      */
     private static convertToolResultMessage(
         message: EnhancedMessage,
@@ -170,7 +170,7 @@ export class Converter {
     }
     
     /**
-     * 🖼️ 转换带图像的多模态消息
+     * 转换带图像的多模态消息
      */
     private static async convertMultimodalMessage(
         message: EnhancedMessage,
@@ -190,7 +190,7 @@ export class Converter {
                 
             } else if (part.type === 'image_url' && part.image_url) {
                 
-                // 🔥 革命性：如果模型支持视觉则处理图像！
+                // 如果模型支持视觉则处理图像
                 if (selectedModel.supportsVision) {
                     try {
                         const imageContent = await this.processImageContent(part.image_url.url);
@@ -221,11 +221,10 @@ export class Converter {
     }
     
     /**
-     * 🖼️ 处理图像内容（Base64、URL 或文件路径）
+     * 处理图像内容（Base64、URL 或文件路径）
      */
     private static async processImageContent(imageUrl: string): Promise<{ description: string; data?: string } | null> {
         try {
-            // 处理不同的图像源
             if (imageUrl.startsWith('data:image/')) {
                 // Base64 编码图像
                 const [header, data] = imageUrl.split(',');
@@ -234,33 +233,20 @@ export class Converter {
                     description: `Base64 ${mimeType} image`,
                     data: data
                 };
-                
+
             } else if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
-                // URL 图像 - 出于安全考虑，我们只记录它
-                return {
-                    description: `Remote image from ${new URL(imageUrl).hostname}`
-                };
-                
-            } else if (imageUrl.startsWith('file://') || await this.fileExists(imageUrl)) {
-                // 本地文件
-                const filePath = imageUrl.startsWith('file://') ? imageUrl.slice(7) : imageUrl;
-                const ext = path.extname(filePath).toLowerCase();
-                const supportedFormats = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
-                
-                if (supportedFormats.includes(ext)) {
-                    try {
-                        const stats = await fs.promises.stat(filePath);
-                        return {
-                            description: `Local ${ext.slice(1)} image (${(stats.size / 1024).toFixed(1)}KB)`
-                        };
-                    } catch (error) {
-                        return {
-                            description: `Local ${ext.slice(1)} image (size unknown)`
-                        };
-                    }
+                // HTTP URL 图像 - 出于安全考虑，仅记录来源
+                try {
+                    return {
+                        description: `Remote image from ${new URL(imageUrl).hostname}`
+                    };
+                } catch {
+                    return {
+                        description: `Remote image URL`
+                    };
                 }
             }
-            
+
             return null;
         } catch (error) {
             logger.error('Error processing image:', error as Error);
@@ -269,7 +255,7 @@ export class Converter {
     }
 
     /**
-     * 🧾 提取消息中的文本内容
+     * 提取消息中的文本内容
      */
     private static extractTextContent(message: EnhancedMessage): string {
         if (typeof message.content === 'string') {
@@ -288,7 +274,7 @@ export class Converter {
     }
 
     /**
-     * 🧾 提取 tool 结果文本
+     * 提取 tool 结果文本
      */
     private static extractToolResultText(content: EnhancedMessage['content']): string {
         if (typeof content === 'string') {
@@ -306,7 +292,7 @@ export class Converter {
     }
 
     /**
-     * 🔄 将工具参数字符串解析为对象
+     * 将工具参数字符串解析为对象
      */
     private static parseToolArguments(rawArguments: string): object {
         try {
@@ -345,7 +331,7 @@ export class Converter {
     }
 
     /**
-     * 🔄 VS Code ToolCallPart -> OpenAI ToolCall
+     * VS Code ToolCallPart -> OpenAI ToolCall
      */
     private static convertVSCodeToolCallPart(part: vscode.LanguageModelToolCallPart): ToolCall {
         return {
@@ -384,7 +370,7 @@ export class Converter {
     }
     
     /**
-     * 🔄 将 OpenAI 角色映射到 VS Code 角色
+     * 将 OpenAI 角色映射到 VS Code 角色
      */
     private static mapRoleToVSCode(role: string): vscode.LanguageModelChatMessageRole {
         switch (role) {
@@ -401,7 +387,7 @@ export class Converter {
     }
     
     /**
-     * 🏷️ 为内容格式化角色前缀
+     * 为内容格式化角色前缀
      */
     private static formatRolePrefix(role: string): string {
         switch (role) {
@@ -418,7 +404,7 @@ export class Converter {
     }
     
     /**
-     * 📝 创建增强完成响应
+     * 创建增强完成响应
      */
     public static createCompletionResponse(
         content: string,
@@ -470,7 +456,7 @@ export class Converter {
     }
     
     /**
-     * 🌊 创建增强流式响应块
+     * 创建增强流式响应块
      */
     public static createStreamChunk(
         context: EnhancedRequestContext,
@@ -495,7 +481,7 @@ export class Converter {
     }
     
     /**
-     * 📋 创建动态模型响应
+     * 创建动态模型响应
      */
     public static createModelsResponse(availableModels: ModelCapabilities[]): OpenAIModelsResponse {
         const now = Math.floor(Date.now() / 1000);
@@ -556,7 +542,7 @@ export class Converter {
     }
     
     /**
-     * 🌊 从带有增强上下文的 VS Code LM 响应流中提取内容
+     * 从带有增强上下文的 VS Code LM 响应流中提取内容
      */
     public static async *extractStreamContent(
         response: vscode.LanguageModelChatResponse,
@@ -673,7 +659,7 @@ export class Converter {
     }
     
     /**
-     * 📝 从 VS Code LM 响应中收集所有内容
+     * 从 VS Code LM 响应中收集所有内容
      */
     public static async collectFullResponse(
         response: vscode.LanguageModelChatResponse
@@ -700,7 +686,7 @@ export class Converter {
     }
     
     /**
-     * 🔄 创建服务器发送事件数据
+     * 创建服务器发送事件数据
      */
     public static createSSEEvent(type: 'data' | 'done' | 'error', data?: any): string {
         switch (type) {
@@ -716,7 +702,7 @@ export class Converter {
     }
     
     /**
-     * 📈 增强令牌估算
+     * 增强令牌估算
      */
     private static estimateTokens(text: string): number {
         // 更精细的令牌估算
@@ -727,7 +713,7 @@ export class Converter {
     }
     
     /**
-     * 🎯 创建增强转换上下文
+     * 创建增强转换上下文
      */
     public static createEnhancedContext(
         requestId: string,
@@ -796,9 +782,9 @@ export class Converter {
     }
     
     /**
-     * 📊 创建带有模型信息的健康检查响应
+     * 创建带有模型信息的健康检查响应
      */
-    public static createHealthResponse(serverState: any, modelPool?: any) {
+    public static createHealthResponse(serverState: ServerState, modelPool?: ModelPool) {
         return {
             status: 'ok',
             timestamp: new Date().toISOString(),
@@ -815,26 +801,14 @@ export class Converter {
                 secondary: modelPool.secondary.length,
                 fallback: modelPool.fallback.length,
                 unhealthy: modelPool.unhealthy.length,
-                supportsVision: modelPool.primary.filter((m: any) => m.supportsVision).length,
-                supportsTools: modelPool.primary.filter((m: any) => m.supportsTools).length
+                supportsVision: modelPool.primary.filter(m => m.supportsVision).length,
+                supportsTools: modelPool.primary.filter(m => m.supportsTools).length
             } : undefined
         };
     }
     
     /**
-     * 🔍 异步检查文件是否存在
-     */
-    private static async fileExists(filePath: string): Promise<boolean> {
-        try {
-            await fs.promises.access(filePath);
-            return true;
-        } catch {
-            return false;
-        }
-    }
-
-    /**
-     * 🚀 创建 OpenAI 格式的错误响应
+     * 创建 OpenAI 格式的错误响应
      */
     public static createErrorResponse(
         message: string,

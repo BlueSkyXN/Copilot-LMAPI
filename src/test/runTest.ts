@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
+import { SlidingWindowRateLimiter, TokenBucketRateLimiter } from '../utils/RateLimiter';
 
 type ValidatorModule = {
     Validator: {
@@ -121,6 +122,34 @@ const checks: CheckCase[] = [
             assert.ok(
                 !content.includes('supportsFunctionCalling'),
                 'ModelDiscoveryService should not reference supportsFunctionCalling'
+            );
+        }
+    },
+    {
+        name: 'ModelDiscoveryService avoids optimistic always-true capability defaults',
+        run: () => {
+            const content = readRepoFile('src/services/ModelDiscoveryService.ts');
+            assert.ok(
+                content.includes('const visionHints = [') && content.includes('const toolHints = ['),
+                'Capability probes should use conservative hint-based detection'
+            );
+            assert.ok(
+                content.includes('getCapabilityProbeText('),
+                'Capability probes should normalize model metadata before matching'
+            );
+        }
+    },
+    {
+        name: 'ModelDiscoveryService rebuilds cache during discovery',
+        run: () => {
+            const content = readRepoFile('src/services/ModelDiscoveryService.ts');
+            assert.ok(
+                content.includes('const nextModelCache = new Map<string, ModelCapabilities>();'),
+                'Discovery should rebuild model cache from current probe results'
+            );
+            assert.ok(
+                content.includes('this.modelCache = nextModelCache;'),
+                'Discovery should replace cache atomically to avoid stale model entries'
             );
         }
     },
@@ -249,9 +278,77 @@ const checks: CheckCase[] = [
         name: 'RequestHandler delays SSE headers until first chunk',
         run: () => {
             const content = readRepoFile('src/server/RequestHandler.ts');
+            const hasDeferredHeaderGuard = content.includes('if (!res.headersSent) {');
+            const hasSseWriteHead =
+                content.includes('res.writeHead(HTTP_STATUS.OK);') ||
+                content.includes('res.writeHead(HTTP_STATUS.OK, getSSEHeaders());') ||
+                content.includes('res.writeHead(HTTP_STATUS.OK, SSE_HEADERS);');
+            const hasSseContentType =
+                content.includes("res.setHeader('Content-Type', CONTENT_TYPES.SSE);") ||
+                content.includes('res.writeHead(HTTP_STATUS.OK, getSSEHeaders());') ||
+                content.includes('res.writeHead(HTTP_STATUS.OK, SSE_HEADERS);');
             assert.ok(
-                content.includes("if (!res.headersSent) {") && content.includes("res.writeHead(HTTP_STATUS.OK, SSE_HEADERS);"),
+                hasDeferredHeaderGuard && hasSseWriteHead && hasSseContentType,
                 'Streaming handler should defer SSE header emission until first chunk'
+            );
+        }
+    },
+    {
+        name: 'RequestHandler links server cancellation token into LM request token',
+        run: () => {
+            const content = readRepoFile('src/server/RequestHandler.ts');
+            assert.ok(
+                content.includes('serverCancellationToken?: vscode.CancellationToken'),
+                'Chat completions handler should accept an optional server cancellation token'
+            );
+            assert.ok(
+                content.includes('serverCancellationToken.onCancellationRequested'),
+                'Handler should subscribe to server cancellation and cancel LM request'
+            );
+        }
+    },
+    {
+        name: 'CopilotServer rate-limits unauthorized requests',
+        run: () => {
+            const content = readRepoFile('src/server/CopilotServer.ts');
+            assert.ok(
+                content.includes('private unauthorizedRequestLimiter: SlidingWindowRateLimiter;'),
+                'Server should define a dedicated limiter for unauthorized requests'
+            );
+            assert.ok(
+                content.includes('const unauthorizedRateLimit = this.unauthorizedRequestLimiter.peek();') &&
+                content.includes('this.unauthorizedRequestLimiter.record();'),
+                'Unauthorized requests should be checked and recorded in the dedicated limiter'
+            );
+        }
+    },
+    {
+        name: 'RequestHandler status flags reflect explicit model routing',
+        run: () => {
+            const content = readRepoFile('src/server/RequestHandler.ts');
+            assert.ok(
+                !content.includes('autoModelSelection:'),
+                'Status endpoint should not expose removed autoModelSelection flag'
+            );
+            assert.ok(
+                content.includes('loadBalancing: false'),
+                'Status endpoint should keep loadBalancing flag aligned with implementation'
+            );
+        }
+    },
+    {
+        name: 'RequestHandler uses short failure cache TTL for Copilot access probe',
+        run: () => {
+            const content = readRepoFile('src/server/RequestHandler.ts');
+            assert.ok(
+                content.includes('COPILOT_ACCESS_SUCCESS_CACHE_TTL = 60_000'),
+                'Successful Copilot access checks should keep a longer cache TTL'
+            );
+            assert.ok(
+                content.includes('COPILOT_ACCESS_FAILURE_CACHE_TTL = 10_000') &&
+                content.includes('? RequestHandler.COPILOT_ACCESS_SUCCESS_CACHE_TTL') &&
+                content.includes(': RequestHandler.COPILOT_ACCESS_FAILURE_CACHE_TTL'),
+                'Copilot access cache should use success TTL only for available=true and short TTL otherwise'
             );
         }
     },
@@ -263,6 +360,57 @@ const checks: CheckCase[] = [
                 content.includes('const pendingEvents: string[] = [];') && content.includes('if (requiresToolCall && !hasToolCalls)'),
                 'Converter should buffer events before first tool call in required mode'
             );
+        }
+    },
+    {
+        name: 'SlidingWindowRateLimiter enforces limit and recovers after window',
+        run: () => {
+            const originalNow = Date.now;
+            let now = 1_000;
+            (Date as { now: () => number }).now = () => now;
+            try {
+                const limiter = new SlidingWindowRateLimiter(2, 1_000);
+                assert.deepStrictEqual(limiter.peek(), { allowed: true, retryAfterMs: 0 });
+
+                limiter.record();
+                limiter.record();
+                const blocked = limiter.peek();
+                assert.strictEqual(blocked.allowed, false);
+                assert.strictEqual(blocked.retryAfterMs, 1_000);
+
+                now += 1_000;
+                assert.strictEqual(limiter.peek().allowed, true);
+            } finally {
+                (Date as { now: () => number }).now = originalNow;
+            }
+        }
+    },
+    {
+        name: 'TokenBucketRateLimiter refills tokens over time',
+        run: () => {
+            const originalNow = Date.now;
+            let now = 2_000;
+            (Date as { now: () => number }).now = () => now;
+            try {
+                const limiter = new TokenBucketRateLimiter(2, 1);
+                assert.strictEqual(limiter.peek().allowed, true);
+
+                limiter.consume();
+                limiter.consume();
+                const blocked = limiter.peek();
+                assert.strictEqual(blocked.allowed, false);
+                assert.strictEqual(blocked.retryAfterMs, 1_000);
+
+                now += 500;
+                const halfRefill = limiter.peek();
+                assert.strictEqual(halfRefill.allowed, false);
+                assert.strictEqual(halfRefill.retryAfterMs, 500);
+
+                now += 500;
+                assert.strictEqual(limiter.peek().allowed, true);
+            } finally {
+                (Date as { now: () => number }).now = originalNow;
+            }
         }
     }
 ];
