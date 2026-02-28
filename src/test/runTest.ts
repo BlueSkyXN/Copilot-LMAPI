@@ -71,9 +71,80 @@ const checks: CheckCase[] = [
                 'ModelDiscoveryService should not reference supportsFunctionCalling'
             );
         }
+    },
+    {
+        name: 'WebConsole module exports generateConsoleHTML and getEndpointList',
+        run: () => {
+            const content = readRepoFile('src/server/WebConsole.ts');
+            assert.ok(
+                content.includes('export function generateConsoleHTML'),
+                'WebConsole should export generateConsoleHTML'
+            );
+            assert.ok(
+                content.includes('export function getEndpointList'),
+                'WebConsole should export getEndpointList'
+            );
+        }
+    },
+    {
+        name: 'WebConsole HTML contains essential dashboard elements',
+        run: () => {
+            const content = readRepoFile('src/server/WebConsole.ts');
+            assert.ok(
+                content.includes('Copilot LMAPI Console'),
+                'Console HTML should contain the title'
+            );
+            assert.ok(
+                content.includes('API_ENDPOINTS.CHAT_COMPLETIONS'),
+                'Console should reference chat completions endpoint'
+            );
+            assert.ok(
+                content.includes('API_ENDPOINTS.MODELS'),
+                'Console should reference models endpoint'
+            );
+            assert.ok(
+                content.includes('API_ENDPOINTS.HEALTH'),
+                'Console should reference health endpoint'
+            );
+            assert.ok(
+                content.includes('escapeHtml'),
+                'Console should use HTML escaping for security'
+            );
+        }
+    },
+    {
+        name: 'CopilotServer routes root path to web console',
+        run: () => {
+            const content = readRepoFile('src/server/CopilotServer.ts');
+            assert.ok(
+                content.includes("import { generateConsoleHTML, getEndpointList } from './WebConsole'"),
+                'CopilotServer should import WebConsole functions'
+            );
+            assert.ok(
+                content.includes('case API_ENDPOINTS.CONSOLE:'),
+                'CopilotServer should route CONSOLE endpoint'
+            );
+            assert.ok(
+                content.includes('handleConsole'),
+                'CopilotServer should have handleConsole method'
+            );
+        }
+    },
+    {
+        name: 'Config defines CONSOLE endpoint and HTML content type',
+        run: () => {
+            const content = readRepoFile('src/constants/Config.ts');
+            assert.ok(
+                content.includes("CONSOLE: '/'"),
+                'API_ENDPOINTS should define CONSOLE as /'
+            );
+            assert.ok(
+                content.includes("HTML: 'text/html'"),
+                'CONTENT_TYPES should define HTML type'
+            );
+        }
     }
 ];
-
 runChecks(checks).catch((error) => {
     console.error('Unexpected test runner error');
     console.error(error);
