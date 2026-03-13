@@ -2,7 +2,7 @@
   "name": "copilot-lmapi-bridge",
   "displayName": "Copilot-LMAPI",
   "description": "Bridge VS Code Copilot Language Model API to OpenAI-compatible HTTP API",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "publisher": "copilot-bridge",
   "engines": {
     "vscode": "^1.92.0"
@@ -82,6 +82,11 @@
           "minimum": 5000,
           "maximum": 600000,
           "description": "Request timeout in milliseconds"
+        },
+        "copilot-lmapi.authToken": {
+          "type": "string",
+          "default": "",
+          "description": "Optional fixed Bearer token. Leave empty to disable HTTP auth and allow requests with or without Authorization."
         },
         "copilot-lmapi.modelCacheRefreshInterval": {
           "type": "number",

@@ -120,6 +120,16 @@ import {
 } from '../types/ModelCapabilities';
 import { logger } from '../utils/Logger';
 
+interface RuntimeLanguageModelCapabilities {
+    supportsToolCalling?: boolean;
+    supportsImageToText?: boolean;
+    editToolsHint?: readonly string[];
+}
+
+type RuntimeLanguageModelChat = vscode.LanguageModelChat & {
+    capabilities?: RuntimeLanguageModelCapabilities;
+};
+
 /**
  * 模型发现服务类
  *
@@ -146,6 +156,8 @@ export class ModelDiscoveryService {
     private eventEmitter: vscode.EventEmitter<ModelEvent>;
     /** 服务配置，包含缓存刷新间隔、健康检查间隔等参数 */
     private config: ModelDiscoveryConfig;
+    /** 来自 ExtensionContext 的语言模型访问状态接口（可选） */
+    private accessInformation?: vscode.LanguageModelAccessInformation;
     /** 后台模型缓存定时刷新器 */
     private refreshTimer?: NodeJS.Timeout;
     /** 后台健康检查定时器 */
@@ -162,7 +174,10 @@ export class ModelDiscoveryService {
      *
      * @param config - 可选的部分配置覆盖，未提供的字段将使用 VS Code 设置中的默认值
      */
-    constructor(config?: Partial<ModelDiscoveryConfig>) {
+    constructor(
+        config?: Partial<ModelDiscoveryConfig>,
+        accessInformation?: vscode.LanguageModelAccessInformation
+    ) {
         const vsCodeConfig = vscode.workspace.getConfiguration('copilot-lmapi');
         
         this.config = {
@@ -187,6 +202,7 @@ export class ModelDiscoveryService {
         this.modelCache = new Map();
         this.eventEmitter = new vscode.EventEmitter<ModelEvent>();
         this.onModelEvent = this.eventEmitter.event;
+        this.accessInformation = accessInformation;
         
         this.startBackgroundServices();
     }
@@ -217,33 +233,51 @@ export class ModelDiscoveryService {
             logger.info(`Found ${allModels.length} total models`);
             this.logRawModelDiscoverySnapshot(allModels);
             
-            const discoveredModels: ModelCapabilities[] = [];
             const nextModelCache = new Map<string, ModelCapabilities>();
             
             // 测试每个模型的能力
             for (const vsCodeModel of allModels) {
                 try {
                     const capabilities = await this.analyzeModelCapabilities(vsCodeModel);
-                    discoveredModels.push(capabilities);
-                    
-                    // 缓存模型
+                    const existing = nextModelCache.get(capabilities.id);
+                    if (existing) {
+                        const preferred = this.selectPreferredModelVariant(existing, capabilities);
+                        const replaced = preferred === capabilities;
+                        nextModelCache.set(capabilities.id, preferred);
+                        logger.debug('Deduplicated discovered model variant:', {
+                            id: capabilities.id,
+                            keptVendor: preferred.vendor,
+                            keptVersion: preferred.version,
+                            droppedVendor: replaced ? existing.vendor : capabilities.vendor,
+                            droppedVersion: replaced ? existing.version : capabilities.version
+                        });
+                        continue;
+                    }
+
                     nextModelCache.set(capabilities.id, capabilities);
-                    
-                    // 初始化指标
-                    this.initializeModelMetrics(capabilities.id);
-                    
-                    // 发出发现事件
-                    this.eventEmitter.fire({ type: 'model_discovered', model: capabilities });
-                    
-                    logger.info(`Model ${capabilities.id} discovered with capabilities:`, {
-                        vision: capabilities.supportsVision,
-                        tools: capabilities.supportsTools,
-                        tokens: capabilities.maxInputTokens
-                    });
                     
                 } catch (error) {
                     logger.warn(`Failed to analyze model ${vsCodeModel.id}:`, { error: String(error) });
                 }
+            }
+
+            const discoveredModels = Array.from(nextModelCache.values());
+
+            for (const capabilities of discoveredModels) {
+                this.initializeModelMetrics(capabilities.id);
+                this.eventEmitter.fire({ type: 'model_discovered', model: capabilities });
+
+                logger.info(`Model ${capabilities.id} discovered with capabilities:`, {
+                    vision: capabilities.supportsVision,
+                    visionState: capabilities.visionSupportState,
+                    tools: capabilities.supportsTools,
+                    toolState: capabilities.toolSupportState,
+                    contextWindow: capabilities.contextWindow,
+                    maxInputTokens: capabilities.maxInputTokens,
+                    maxOutputTokens: capabilities.maxOutputTokens,
+                    requestAccess: capabilities.canSendRequest,
+                    metadataSource: capabilities.metadataSource
+                });
             }
             
             // 更新模型池
@@ -304,273 +338,129 @@ export class ModelDiscoveryService {
      */
     private async analyzeModelCapabilities(vsCodeModel: vscode.LanguageModelChat): Promise<ModelCapabilities> {
         const startTime = Date.now();
+        const existing = this.modelCache.get(vsCodeModel.id);
+        const canSendRequest = this.accessInformation?.canSendRequest(vsCodeModel);
+        const runtimeCapabilities = (vsCodeModel as RuntimeLanguageModelChat).capabilities;
+        const proposedToolState = this.toSupportState(runtimeCapabilities?.supportsToolCalling);
+        const proposedVisionState = this.toSupportState(runtimeCapabilities?.supportsImageToText);
+        const lmapiToolState = proposedToolState !== 'unknown' ? proposedToolState : undefined;
+        const observedToolState = existing?.toolSupportSource === 'lmapi-observed-request'
+            ? existing.toolSupportState
+            : undefined;
+        const toolSupportState = observedToolState ?? lmapiToolState ?? existing?.toolSupportState ?? 'unknown';
+        const toolSupportSource = observedToolState
+            ? 'lmapi-observed-request'
+            : lmapiToolState
+                ? 'lmapi-proposed-capabilities'
+                : existing?.toolSupportSource ?? 'not-exposed-by-lmapi';
+        const canBridgeTransportNativeImages = false;
+        const effectiveVisionState = proposedVisionState === 'supported' && !canBridgeTransportNativeImages
+            ? 'unknown'
+            : proposedVisionState;
+        const visionSupportSource = proposedVisionState === 'supported' && !canBridgeTransportNativeImages
+            ? 'runtime-capability-present-but-bridge-lacks-image-part-transport'
+            : proposedVisionState !== 'unknown'
+                ? 'lmapi-proposed-capabilities'
+                : 'current-vscode-lmapi-user-message-parts';
         
-        // 基本模型信息
         const capabilities: ModelCapabilities = {
             id: vsCodeModel.id,
+            displayName: vsCodeModel.name,
             family: vsCodeModel.family,
             vendor: vsCodeModel.vendor,
             version: vsCodeModel.version,
             maxInputTokens: vsCodeModel.maxInputTokens,
             contextWindow: vsCodeModel.maxInputTokens,
-            supportsVision: false,
-            supportsTools: false,
-            supportsStreaming: true, // VS Code 模型默认为 true
-            supportsMultimodal: false,
+            supportsVision: effectiveVisionState === 'supported',
+            supportsTools: toolSupportState === 'supported',
+            supportsStreaming: true,
+            supportsMultimodal: effectiveVisionState === 'supported',
+            toolSupportState,
+            toolSupportSource,
+            visionSupportState: effectiveVisionState,
+            visionSupportSource,
+            inputModalities: effectiveVisionState === 'supported' ? ['text', 'image'] : ['text'],
+            outputModalities: ['text'],
             isHealthy: true,
             vsCodeModel: vsCodeModel,
-            lastTestedAt: new Date()
+            lastTestedAt: new Date(),
+            canSendRequest: typeof canSendRequest === 'boolean' ? canSendRequest : undefined,
+            metadataSource: existing?.metadataSource ?? 'lmapi-direct'
         };
-        
-        let visionCapabilityProbe: { probeText: string; matchedHints: string[]; supported: boolean } | undefined;
 
-        // 测试视觉能力
-        try {
-            visionCapabilityProbe = this.evaluateVisionCapability(vsCodeModel);
-            capabilities.supportsVision = visionCapabilityProbe.supported;
-            if (capabilities.supportsVision) {
-                capabilities.supportsMultimodal = true;
-                capabilities.supportedImageFormats = ['jpeg', 'jpg', 'png', 'gif', 'webp'];
-                capabilities.maxImagesPerRequest = 10; // 保守估计
-            }
-        } catch (error) {
-            logger.debug(`Vision test failed for ${vsCodeModel.id}:`, { error: String(error) });
-        }
-        
-        let toolCapabilityProbe: { probeText: string; matchedHints: string[]; supported: boolean } | undefined;
-
-        // 测试工具/函数调用能力
-        try {
-            toolCapabilityProbe = this.evaluateToolCapability(vsCodeModel);
-            capabilities.supportsTools = toolCapabilityProbe.supported;
-        } catch (error) {
-            logger.debug(`Tool test failed for ${vsCodeModel.id}:`, { error: String(error) });
-        }
-        
-        // 测试性能
         const responseTime = Date.now() - startTime;
         capabilities.responseTime = responseTime;
 
-        // 智能能力推理
-        this.inferAdvancedCapabilities(capabilities);
-
-        logger.debug(`Vision capability probe for ${vsCodeModel.id}:`, {
-            probeText: visionCapabilityProbe?.probeText ?? this.getCapabilityProbeText(vsCodeModel),
-            matchedHints: visionCapabilityProbe?.matchedHints ?? [],
-            supportsVision: capabilities.supportsVision
-        });
-
-        logger.debug(`Tool capability probe for ${vsCodeModel.id}:`, {
-            probeText: toolCapabilityProbe?.probeText ?? this.getCapabilityProbeText(vsCodeModel),
-            matchedHints: toolCapabilityProbe?.matchedHints ?? [],
-            supportsTools: capabilities.supportsTools
+        logger.debug(`LMAPI capability surface for ${vsCodeModel.id}:`, {
+            name: capabilities.displayName,
+            vendor: capabilities.vendor,
+            family: capabilities.family,
+            version: capabilities.version,
+            maxInputTokens: capabilities.maxInputTokens,
+            canSendRequest: capabilities.canSendRequest,
+            tools: {
+                supported: capabilities.supportsTools,
+                state: capabilities.toolSupportState,
+                source: capabilities.toolSupportSource
+            },
+            vision: {
+                supported: capabilities.supportsVision,
+                state: capabilities.visionSupportState,
+                source: capabilities.visionSupportSource
+            },
+            runtimeCapabilities: {
+                supportsToolCalling: runtimeCapabilities?.supportsToolCalling,
+                supportsImageToText: runtimeCapabilities?.supportsImageToText,
+                editToolsHint: runtimeCapabilities?.editToolsHint
+            }
         });
         
         return capabilities;
     }
-    
-    /**
-     * 测试模型是否支持视觉/图像输入
-     *
-     * 通过检查模型的 ID、family、vendor 等标识信息中是否包含已知的
-     * 视觉模型关键词（如 vision、multimodal、gpt-4o、claude-3 等）来推断能力。
-     * 采用基于名称的启发式匹配，而非实际发送图像进行探测。
-     *
-     * @param model - 待测试的 VS Code 语言模型
-     * @returns 是否支持视觉输入
-     */
-    private async testVisionCapability(model: vscode.LanguageModelChat): Promise<boolean> {
-        try {
-            return this.evaluateVisionCapability(model).supported;
-        } catch (error) {
-            return false;
+
+    private toSupportState(
+        value: boolean | undefined
+    ): 'supported' | 'unsupported' | 'unknown' {
+        if (value === true) {
+            return 'supported';
         }
-    }
-
-    /**
-     * 返回视觉能力启发式探测的输入文本与命中项，优先使用已确认的官方模型模式修正误判。
-     */
-    private evaluateVisionCapability(
-        model: vscode.LanguageModelChat
-    ): { probeText: string; matchedHints: string[]; supported: boolean } {
-        const probeText = this.getCapabilityProbeText(model);
-        const identities = this.getCapabilityProbeCandidates(model);
-        const exactFalse = new Set([
-            'gpt-3.5-turbo',
-            'gpt-3.5-turbo-0613',
-            'gpt-4',
-            'gpt-4-0613',
-            'gpt-4-o-preview',
-            'gpt-4o-mini',
-            'gpt-4o-mini-2024-07-18',
-            'gpt-4o-2024-08-06',
-            'gpt-41-copilot',
-            'grok-code-fast-1',
-            'text-embedding-3-small',
-            'text-embedding-3-small-inference',
-            'text-embedding-ada-002'
-        ]);
-        const prefixTrue = [
-            'claude-',
-            'gemini-',
-            'gpt-5',
-            'gpt-4.1',
-            'gpt-4o'
-        ];
-
-        for (const identity of identities) {
-            if (exactFalse.has(identity)) {
-                return {
-                    probeText,
-                    matchedHints: [`exact:false:${identity}`],
-                    supported: false
-                };
-            }
+        if (value === false) {
+            return 'unsupported';
         }
-
-        const matchedHints = prefixTrue
-            .filter(prefix => identities.some(identity => identity.startsWith(prefix)))
-            .map(prefix => `prefix:true:${prefix}`);
-
-        return {
-            probeText,
-            matchedHints,
-            supported: matchedHints.length > 0
-        };
+        return 'unknown';
     }
 
     /**
-     * 测试模型是否支持工具/函数调用
-     *
-     * 通过检查模型标识信息中是否包含已知的支持工具调用的模型关键词
-     * （如 gpt-3.5、gpt-4、claude、gemini 等）来推断能力。
-     * 同时支持字符串精确匹配和正则表达式匹配。
-     *
-     * @param model - 待测试的 VS Code 语言模型
-     * @returns 是否支持工具/函数调用
+     * 根据 vendor/version/maxInputTokens 选择同一 id 的首选运行时模型对象。
      */
-    private async testToolCapability(model: vscode.LanguageModelChat): Promise<boolean> {
-        try {
-            return this.evaluateToolCapability(model).matchedHints.length > 0;
-        } catch (error) {
-            return false;
-        }
+    private selectPreferredModelVariant(
+        existing: ModelCapabilities,
+        candidate: ModelCapabilities
+    ): ModelCapabilities {
+        return this.getModelVariantPriority(candidate) > this.getModelVariantPriority(existing)
+            ? candidate
+            : existing;
     }
 
-    /**
-     * 返回工具能力启发式探测的输入文本与命中项，便于定位误判原因。
-     */
-    private evaluateToolCapability(
-        model: vscode.LanguageModelChat
-    ): { probeText: string; matchedHints: string[]; supported: boolean } {
-        const probeText = this.getCapabilityProbeText(model);
-        const identities = this.getCapabilityProbeCandidates(model);
-        const exactFalse = new Set([
-            'gpt-41-copilot',
-            'text-embedding-3-small',
-            'text-embedding-3-small-inference',
-            'text-embedding-ada-002'
-        ]);
+    private getModelVariantPriority(model: ModelCapabilities): number {
+        const vendor = model.vendor?.toLowerCase() ?? '';
+        const vendorPriority =
+            vendor === 'copilot' ? 300 :
+            vendor === 'claude-code' ? 200 :
+            vendor === 'copilotcli' ? 100 :
+            0;
 
-        for (const identity of identities) {
-            if (exactFalse.has(identity)) {
-                return {
-                    probeText,
-                    matchedHints: [`exact:false:${identity}`],
-                    supported: false
-                };
-            }
-        }
-
-        const toolHints = [
-            'gpt-3.5',
-            'gpt-4',
-            'gpt-5',
-            /\bo1\b/,
-            /\bo3\b/,
-            /\bo4\b/,
-            'claude',
-            'gemini',
-            'grok',
-            'tool',
-            'function'
-        ];
-
-        const matchedHints = toolHints
-            .filter(hint => (typeof hint === 'string' ? probeText.includes(hint) : hint.test(probeText)))
-            .map(hint => hint.toString());
-
-        return {
-            probeText,
-            matchedHints,
-            supported: matchedHints.length > 0
-        };
+        return vendorPriority + (model.version ? 10 : 0) + model.maxInputTokens / 1000;
     }
 
-    /**
-     * 提取用于能力探测的候选标识，按 id/family/vendor 去重。
-     */
-    private getCapabilityProbeCandidates(model: vscode.LanguageModelChat): string[] {
-        return Array.from(
-            new Set(
-                [model.id, model.family, model.vendor]
-                    .filter((value): value is string => Boolean(value))
-                    .map(value => value.toLowerCase())
-            )
-        );
-    }
-
-    /**
-     * 生成归一化的能力探测文本
-     *
-     * 将模型的 id、family、vendor 字段合并为统一的小写字符串，
-     * 用于视觉和工具能力的关键词匹配，避免仅依赖单个字段导致误判。
-     *
-     * @param model - VS Code 语言模型对象
-     * @returns 合并后的小写探测文本
-     */
-    private getCapabilityProbeText(model: vscode.LanguageModelChat): string {
-        return [model.id, model.family, model.vendor]
-            .filter(Boolean)
-            .join(' ')
-            .toLowerCase();
-    }
-    
-    /**
-     * 智能推理模型的高级能力参数
-     *
-     * 根据已知的基础能力信息推断额外参数：
-     * - 若未设置 maxOutputTokens，按 maxInputTokens 的 50%（上限 4096）估算
-     * - 若模型支持视觉，设置默认的最大图片大小（20MB）
-     * - 将 contextWindow 与 maxInputTokens 保持同步
-     *
-     * @param capabilities - 待补充的模型能力对象（原地修改）
-     */
-    private inferAdvancedCapabilities(capabilities: ModelCapabilities): void {
-        // 推断最大输出令牌数
-        if (!capabilities.maxOutputTokens) {
-            capabilities.maxOutputTokens = Math.min(capabilities.maxInputTokens * 0.5, 4096);
-        }
-
-        // 为视觉模型推断图像能力
-        if (capabilities.supportsVision) {
-            capabilities.maxImageSize = 20 * 1024 * 1024; // 20MB
-        }
-
-        // 设置上下文窗口（目前与最大输入相同）
-        capabilities.contextWindow = capabilities.maxInputTokens;
-    }
-    
-    
     /**
      * 计算模型的综合能力评分
      *
      * 根据多维度指标为模型生成数值评分，用于模型池内的排序。
      * 评分维度包括：
      * - 令牌容量（maxInputTokens / 1000）
-     * - 视觉支持（+50 分）
-     * - 工具调用支持（+30 分）
-     * - 多模态支持（+20 分）
+     * - 已观测到可用的工具调用（+40 分）
+     * - 已获得请求权限（+20 分）
      * - 健康/成功率（successRate * 100）
      *
      * @param model - 待评分的模型能力对象
@@ -580,13 +470,10 @@ export class ModelDiscoveryService {
         let score = 0;
         
         score += model.maxInputTokens / 1000; // 令牌容量
-        if (model.supportsVision) {
-            score += 50;
-        }
         if (model.supportsTools) {
-            score += 30;
+            score += 40;
         }
-        if (model.supportsMultimodal) {
+        if (model.canSendRequest === true) {
             score += 20;
         }
         score += (model.successRate || 0.5) * 100; // 健康评分
@@ -598,8 +485,8 @@ export class ModelDiscoveryService {
      * 更新模型池的分级组织结构
      *
      * 将所有已发现的模型按健康状态和能力特征分配到四个池中：
-     * - primary：同时支持视觉和工具调用的模型（最高优先级）
-     * - secondary：支持工具调用或上下文窗口超过 64K 的模型
+     * - primary：已观测到工具调用可用，或超大上下文窗口的模型
+     * - secondary：已确认可请求，或上下文窗口超过 64K 的模型
      * - fallback：其他健康的基础模型
      * - unhealthy：健康检查未通过的模型
      *
@@ -622,9 +509,9 @@ export class ModelDiscoveryService {
         for (const model of models) {
             if (!model.isHealthy) {
                 this.modelPool.unhealthy.push(model);
-            } else if (model.supportsVision && model.supportsTools) {
+            } else if (model.supportsTools || model.maxInputTokens > 128000) {
                 this.modelPool.primary.push(model);
-            } else if (model.supportsTools || model.maxInputTokens > 64000) {
+            } else if (model.canSendRequest !== false || model.maxInputTokens > 64000) {
                 this.modelPool.secondary.push(model);
             } else {
                 this.modelPool.fallback.push(model);
@@ -763,6 +650,26 @@ export class ModelDiscoveryService {
      */
     public getAllModels(): ModelCapabilities[] {
         return Array.from(this.modelCache.values());
+    }
+
+    /**
+     * 写回运行时真实观测到的工具调用兼容性。
+     */
+    public recordToolCallingObservation(
+        modelId: string,
+        state: 'supported' | 'unsupported'
+    ): void {
+        const model = this.modelCache.get(modelId);
+        if (!model) {
+            return;
+        }
+
+        model.supportsTools = state === 'supported';
+        model.toolSupportState = state;
+        model.toolSupportSource = 'lmapi-observed-request';
+        model.metadataSource = 'lmapi-observed';
+
+        void this.updateModelPool(this.getAllModels());
     }
     
     /**

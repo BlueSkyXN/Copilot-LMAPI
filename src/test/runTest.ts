@@ -234,18 +234,23 @@ const checks: CheckCase[] = [
     },
     // --- ModelDiscoveryService 能力探测检查 ---
     {
-        /** 验证 ModelDiscoveryService 使用保守的提示词检测而非乐观默认值 */
-        name: 'ModelDiscoveryService uses supportsTools capability probe',
+        /** 验证 ModelDiscoveryService 改为基于 LMAPI 直出字段与运行时观测，而非内置 registry */
+        name: 'ModelDiscoveryService uses LMAPI direct fields instead of registry overlays',
         run: () => {
             const content = readRepoFile('src/services/ModelDiscoveryService.ts');
             assert.ok(
-                content.includes('supportsTools: false'),
-                'supportsTools should be initialized to false'
+                content.includes('const runtimeCapabilities = (vsCodeModel as RuntimeLanguageModelChat).capabilities;') &&
+                content.includes('const proposedToolState = this.toSupportState(runtimeCapabilities?.supportsToolCalling);') &&
+                content.includes("toolSupportSource = observedToolState"),
+                'supportsTools should derive from runtime LMAPI capability surfaces and prior observations instead of a hardcoded default'
             );
             assert.ok(
-                content.includes('toolCapabilityProbe = this.evaluateToolCapability(vsCodeModel);') &&
-                content.includes('capabilities.supportsTools = toolCapabilityProbe.supported;'),
-                'supportsTools should be derived from explicit heuristic probe details'
+                content.includes('displayName: vsCodeModel.name') &&
+                content.includes("visionSupportSource = proposedVisionState === 'supported' && !canBridgeTransportNativeImages") &&
+                content.includes("'runtime-capability-present-but-bridge-lacks-image-part-transport'") &&
+                !content.includes('lookupOfficialModelMetadata') &&
+                !content.includes('this.applyOfficialMetadata('),
+                'Model discovery should be based on live LMAPI fields and must not use embedded registry overlays'
             );
             assert.ok(
                 !content.includes('supportsFunctionCalling'),
@@ -254,39 +259,36 @@ const checks: CheckCase[] = [
         }
     },
     {
-        /** 验证 ModelDiscoveryService 会记录工具探测依据，便于排查误判 */
-        name: 'ModelDiscoveryService logs tool capability probe details',
+        /** 验证 ModelDiscoveryService 记录 LMAPI 直出能力面和权限信息 */
+        name: 'ModelDiscoveryService logs LMAPI capability surface details',
         run: () => {
             const content = readRepoFile('src/services/ModelDiscoveryService.ts');
             assert.ok(
-                content.includes('logger.debug(`Vision capability probe for ${vsCodeModel.id}:`, {') &&
-                content.includes('logger.debug(`Tool capability probe for ${vsCodeModel.id}:`, {') &&
-                content.includes('probeText: toolCapabilityProbe?.probeText ?? this.getCapabilityProbeText(vsCodeModel)') &&
-                content.includes('matchedHints: toolCapabilityProbe?.matchedHints ?? []') &&
-                content.includes('private evaluateToolCapability('),
-                'Model discovery logs should include the vision/tool probe text and matched hints'
+                content.includes('logger.debug(`LMAPI capability surface for ${vsCodeModel.id}:`, {') &&
+                content.includes('canSendRequest: capabilities.canSendRequest') &&
+                content.includes('toolSupportState') &&
+                content.includes('visionSupportState') &&
+                content.includes('runtimeCapabilities: {'),
+                'Model discovery logs should expose live LMAPI fields, access state, and observed capability states'
             );
         }
     },
     {
-        /** 验证 ModelDiscoveryService 使用基于提示词的保守检测，而非始终为 true 的乐观默认值 */
-        name: 'ModelDiscoveryService avoids optimistic always-true capability defaults',
+        /** 验证 ModelDiscoveryService 不再用 heuristic 猜 vision/tools/reasoning 上限 */
+        name: 'ModelDiscoveryService avoids heuristic model capability guesses',
         run: () => {
             const content = readRepoFile('src/services/ModelDiscoveryService.ts');
             assert.ok(
-                content.includes('const prefixTrue = [') && content.includes('const toolHints = ['),
-                'Capability probes should use conservative prefix/hint-based detection'
+                !content.includes('private evaluateToolCapability(') &&
+                !content.includes('private evaluateVisionCapability(') &&
+                !content.includes('maxInputTokens * 0.5'),
+                'Model discovery should not keep heuristic capability probes or inferred output-token limits'
             );
             assert.ok(
-                content.includes('getCapabilityProbeText(') &&
-                content.includes('private getCapabilityProbeCandidates('),
-                'Capability probes should normalize model metadata before matching'
-            );
-            assert.ok(
-                content.includes('gpt-4o-mini') &&
-                content.includes('grok') &&
-                content.includes('gpt-5'),
-                'Capability probes should include known official-model overrides and hints'
+                content.includes('const canBridgeTransportNativeImages = false;') &&
+                content.includes('supportsVision: effectiveVisionState === \'supported\'') &&
+                content.includes('supportsMultimodal: effectiveVisionState === \'supported\''),
+                'LMAPI-only discovery should avoid pretending that native image transport exists when the bridge cannot send image parts'
             );
         }
     },
@@ -300,8 +302,10 @@ const checks: CheckCase[] = [
                 'Discovery should rebuild model cache from current probe results'
             );
             assert.ok(
+                content.includes('const discoveredModels = Array.from(nextModelCache.values());') &&
+                content.includes('await this.updateModelPool(discoveredModels);') &&
                 content.includes('this.modelCache = nextModelCache;'),
-                'Discovery should replace cache atomically to avoid stale model entries'
+                'Discovery should deduplicate via cache before rebuilding the pool and replacing the cache'
             );
         }
     },
@@ -499,6 +503,51 @@ const checks: CheckCase[] = [
         }
     },
     {
+        /** 验证 CopilotServer 在 authToken 为空时关闭 HTTP 鉴权，并在请求时允许空认证 */
+        name: 'CopilotServer disables auth when authToken is empty',
+        run: () => {
+            const content = readRepoFile('src/server/CopilotServer.ts');
+            assert.ok(
+                content.includes("authToken: config.get<string>('authToken', DEFAULT_CONFIG.authToken)") &&
+                content.includes('if (!this.bearerToken) {') &&
+                content.includes("return true;"),
+                'Server should treat empty authToken as auth-disabled open mode'
+            );
+        }
+    },
+    {
+        /** 验证 RequestHandler 会过滤并组装安全的 modelOptions 再发给 VS Code LM API */
+        name: 'RequestHandler sanitizes model_options before LM request',
+        run: () => {
+            const content = readRepoFile('src/server/RequestHandler.ts');
+            assert.ok(
+                content.includes('const sanitizedModelOptions = this.buildModelOptions(requestData, requestLogger);') &&
+                content.includes('requestOptions.modelOptions = sanitizedModelOptions;') &&
+                content.includes('Dropping unsupported modelOptions before LM request'),
+                'RequestHandler should sanitize modelOptions instead of blindly forwarding unknown keys'
+            );
+        }
+    },
+    {
+        /** 验证 RequestHandler 在 modelOptions 兼容性错误时会去掉 modelOptions 重试 */
+        name: 'RequestHandler retries modelOptions incompatibilities without modelOptions',
+        run: () => {
+            const content = readRepoFile('src/server/RequestHandler.ts');
+            assert.ok(
+                content.includes('withoutModelOptionsRequestOptions') &&
+                content.includes('const likelyModelOptionsError = hasModelOptions && this.isLikelyModelOptionsError(error);') &&
+                content.includes("label: 'without modelOptions'"),
+                'RequestHandler should retry once without modelOptions when the runtime rejects them'
+            );
+            // 确保 isLikelyModelOptionsError 不会因泛化的 "invalid parameter" 误判
+            assert.ok(
+                !content.includes("message.includes('invalid parameter')") &&
+                !content.includes("message.includes('unknown parameter')"),
+                'isLikelyModelOptionsError should not use overly broad patterns that match generic parameter errors'
+            );
+        }
+    },
+    {
         /** 验证 RequestHandler 状态端点不暴露已移除的 autoModelSelection 标志 */
         name: 'RequestHandler status flags reflect explicit model routing',
         run: () => {
@@ -531,15 +580,15 @@ const checks: CheckCase[] = [
         }
     },
     {
-        /** 验证 RequestHandler 会在流/聚合阶段的预头部失败时，去工具重试一次 */
+        /** 验证 RequestHandler 会在流/聚合阶段的预头部失败时，去工具和 modelOptions 重试一次 */
         name: 'RequestHandler retries pre-header tool failures without tools',
         run: () => {
             const content = readRepoFile('src/server/RequestHandler.ts');
             assert.ok(
                 content.includes('Tool-enabled LM stream failed before headers were sent, retrying once without tools') &&
                 content.includes('Tool-enabled LM response processing failed before headers were sent, retrying once without tools') &&
-                content.includes('this.withoutToolsRequestOptions(requestOptions)'),
-                'RequestHandler should retry once without tools when response processing fails before headers are sent'
+                content.includes('const preHeaderFallbackOptions = this.withoutToolsRequestOptions('),
+                'RequestHandler should retry once without tools and modelOptions when response processing fails before headers are sent'
             );
         }
     },
@@ -550,7 +599,7 @@ const checks: CheckCase[] = [
             const content = readRepoFile('src/server/RequestHandler.ts');
             assert.ok(
                 content.includes("requestLogger.debug('LM request with tool settings:'") &&
-                content.includes("requestLogger.info('LM tool failure analysis:'") &&
+                content.includes("requestLogger.info('LM request compatibility failure analysis:'") &&
                 content.includes('model: model.id'),
                 'RequestHandler should log the chosen model and tool fallback analysis for debugging'
             );
@@ -578,6 +627,36 @@ const checks: CheckCase[] = [
             assert.ok(
                 content.includes('const pendingEvents: string[] = [];') && content.includes('if (requiresToolCall && !hasToolCalls)'),
                 'Converter should buffer events before first tool call in required mode'
+            );
+        }
+    },
+    {
+        /** 验证 Converter 不会因为 supportsVision=false 而拒绝 image_url，只会转成文本上下文继续发送 */
+        name: 'Converter treats image_url as hint-only transport input',
+        run: () => {
+            const content = readRepoFile('src/utils/Converter.ts');
+            assert.ok(
+                !content.includes('模型 ${selectedModel.id} 不支持视觉，跳过图像') &&
+                content.includes('const imageContent = await this.processImageContent(part.image_url.url);') &&
+                content.includes('textContent += `\\n[Image: ${part.image_url.url}]\\n`;'),
+                'Converter should not block image_url based on capability hints and should always degrade to descriptive text context'
+            );
+        }
+    },
+    {
+        /** 验证 Converter 在 /v1/models 中暴露 x_lmapi 扩展能力字段 */
+        name: 'Converter enriches model list with x_lmapi metadata',
+        run: () => {
+            const content = readRepoFile('src/utils/Converter.ts');
+            assert.ok(
+                content.includes('x_lmapi: {') &&
+                content.includes('metadata_source: model.metadataSource') &&
+                content.includes('capability_states: {') &&
+                content.includes('capability_sources: {') &&
+                content.includes('limit_sources: {') &&
+                content.includes('context_window_tokens: model.contextWindow') &&
+                content.includes('x_lmapi.model_options'),
+                'Model list response should expose live-known metadata plus state/source annotations via x_lmapi'
             );
         }
     },

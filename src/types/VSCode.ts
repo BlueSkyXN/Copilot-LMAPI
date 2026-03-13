@@ -15,9 +15,8 @@
  * 设计要点：
  *   1. 扩展消息类型 - ExtendedLanguageModelChatMessage 支持多部分内容（文本/工具结果/工具调用）
  *   2. 模型映射表 - MODEL_MAPPING 将常见 OpenAI 模型名映射到 VS Code 选择条件
- *   3. 降级模型列表 - DEFAULT_MODELS 在 LM API 不可用时提供后备模型信息
- *   4. 完整的服务器生命周期类型 - 涵盖配置、状态、指标、日志等
- *   5. 转换上下文 - ConversionContext 在 OpenAI 与 VS Code 格式转换过程中传递元数据
+ *   3. 完整的服务器生命周期类型 - 涵盖配置、状态、指标、日志等
+ *   4. 转换上下文 - ConversionContext 在 OpenAI 与 VS Code 格式转换过程中传递元数据
  *
  * 接口/类型清单：
  *
@@ -57,15 +56,11 @@
  *      - 功能：OpenAI 模型名到 VS Code 模型选择条件的映射表
  *      - 类型：Record<string, ModelSelectionCriteria>
  *
- *   9. DEFAULT_MODELS（const 常量）
- *      - 功能：降级模型列表，在 LM API 不可用时提供后备模型信息
- *      - 类型：CopilotModelInfo[]
- *
- *   10. VSCodeLMResponse（接口）
+ *   9. VSCodeLMResponse（接口）
  *       - 功能：VS Code 语言模型 API 响应
  *       - 关键字段：text (AsyncIterable<string>), model (string)
  *
- *   11. ConversionContext（接口）
+ *   10. ConversionContext（接口）
  *       - 功能：格式转换上下文，在 OpenAI 与 VS Code 格式转换过程中传递元数据
  *       - 关键字段：requestId (string), model (string), stream (boolean)
  */
@@ -105,7 +100,7 @@ export interface ModelSelectionCriteria {
 /**
  * Copilot 模型基本信息接口
  *
- * 用于 DEFAULT_MODELS 降级列表，描述模型的基本元数据。
+ * 描述 Copilot 模型的基本元数据。
  */
 export interface CopilotModelInfo {
     /** 模型唯一标识符 */
@@ -131,6 +126,8 @@ export interface ServerConfig {
     port: number;
     /** HTTP 服务器监听地址（默认 127.0.0.1） */
     host: string;
+    /** 可选固定 Bearer Token；为空时关闭 HTTP 鉴权 */
+    authToken: string;
     /** 是否在扩展激活时自动启动服务器 */
     autoStart: boolean;
     /** 是否启用详细日志 */
@@ -229,36 +226,6 @@ export const MODEL_MAPPING: Record<string, ModelSelectionCriteria> = {
     'claude-3-sonnet': { vendor: 'copilot', family: 'claude-3-sonnet' },
     'claude-3-opus': { vendor: 'copilot', family: 'claude-3-opus' }
 };
-
-/**
- * 降级模型列表
- *
- * 当 VS Code LM API 不可用或查询失败时，提供基本的模型信息作为后备。
- * 包含最常用的 GPT-4o、GPT-4o-mini 和 Claude 3.5 Sonnet。
- */
-export const DEFAULT_MODELS: CopilotModelInfo[] = [
-    {
-        id: 'gpt-4o',
-        family: 'gpt-4o',
-        vendor: 'copilot',
-        maxInputTokens: 128000,
-        available: true
-    },
-    {
-        id: 'gpt-4o-mini',
-        family: 'gpt-4o-mini',
-        vendor: 'copilot',
-        maxInputTokens: 128000,
-        available: true
-    },
-    {
-        id: 'claude-3.5-sonnet',
-        family: 'claude-3.5-sonnet',
-        vendor: 'copilot',
-        maxInputTokens: 200000,
-        available: true
-    }
-];
 
 /**
  * VS Code 语言模型响应接口

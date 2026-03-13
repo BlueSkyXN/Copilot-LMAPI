@@ -16,7 +16,7 @@
  *   - HTTP 服务器生命周期管理（启动/停止/重启）
  *   - 请求路由（将 URL 路径映射到对应的处理器方法）
  *   - 三层速率限制（滑动窗口分钟/小时级 + 令牌桶突发控制）
- *   - Bearer Token 认证（使用 timingSafeEqual 防止时序攻击）
+ *   - 可选 Bearer Token 认证（配置为空时默认放行）
  *   - CORS 头部管理（仅允许 localhost 来源）
  *   - 请求超时处理（通过 CancellationToken 取消进行中的 LM 请求）
  *   - 活动请求追踪与优雅关闭
@@ -59,7 +59,7 @@
  *     - config: ServerConfig — 当前服务器配置
  *     - state: ServerState — 运行时状态
  *     - activeRequests: Map<string, ActiveRequest> — 活动请求映射表
- *     - bearerToken: string — 认证令牌
+ *     - bearerToken: string — 可选认证令牌（为空时不鉴权）
  *     - slidingWindowMinute: RateLimiter — 每分钟滑动窗口限流器
  *     - slidingWindowHour: RateLimiter — 每小时滑动窗口限流器
  *     - tokenBucket: RateLimiter — 令牌桶突发控制限流器
@@ -261,7 +261,7 @@ export class CopilotServer {
     private tokenBucket: TokenBucketRateLimiter;
     /** 未授权请求的独立限流器，防止暴力破解 Token */
     private unauthorizedRequestLimiter: SlidingWindowRateLimiter;
-    /** 服务器启动时生成的 Bearer Token，客户端需在请求头中携带此 Token */
+    /** 服务器配置的 Bearer Token；为空时关闭 HTTP 鉴权 */
     private bearerToken: string = '';
 
     /**
@@ -270,10 +270,10 @@ export class CopilotServer {
      * 初始化所有依赖服务和限流器。注意模型发现和请求处理器的异步初始化
      * 延迟到 start() 方法中执行，避免在构造函数中进行异步操作。
      */
-    constructor() {
+    constructor(context?: vscode.ExtensionContext) {
         // 创建单一 ModelDiscoveryService 实例，通过依赖注入传递给 RequestHandler，
         // 确保两者共享同一份模型缓存
-        this.modelDiscovery = new ModelDiscoveryService();
+        this.modelDiscovery = new ModelDiscoveryService(undefined, context?.languageModelAccessInformation);
         this.requestHandler = new RequestHandler(this.modelDiscovery);
         this.config = this.loadConfig();
         this.state = {
@@ -304,7 +304,7 @@ export class CopilotServer {
      *   1. 检查服务器是否已在运行，避免重复启动
      *   2. 验证端口和主机配置的合法性
      *   3. 异步初始化模型发现服务和请求处理器
-     *   4. 生成随机 Bearer Token 用于客户端认证
+     *   4. 应用配置中的可选 Bearer Token（为空时关闭 HTTP 鉴权）
      *   5. 创建 HTTP 服务器并配置连接参数
      *   6. 绑定端口并开始监听
      *
@@ -330,9 +330,8 @@ export class CopilotServer {
         await this.modelDiscovery.discoverAllModels();
         await this.requestHandler.initialize();
 
-        // 生成随机 UUID 作为 Bearer Token，每次启动生成新的 Token，
-        // Token 会在 VS Code 通知中展示给用户
-        this.bearerToken = crypto.randomUUID();
+        // 读取配置中的固定 Token；为空时表示关闭 HTTP 鉴权
+        this.bearerToken = this.config.authToken.trim();
 
         return new Promise((resolve, reject) => {
             try {
@@ -363,8 +362,11 @@ export class CopilotServer {
                         timeout: this.config.requestTimeout
                     });
 
+                    const authSummary = this.bearerToken
+                        ? ` | Bearer Token: ${this.bearerToken}`
+                        : ' | Auth: disabled';
                     vscode.window.showInformationMessage(
-                        `${NOTIFICATIONS.SERVER_STARTED} on http://${serverHost}:${serverPort} | Token: ${this.bearerToken}`
+                        `${NOTIFICATIONS.SERVER_STARTED} on http://${serverHost}:${serverPort}${authSummary}`
                     );
 
                     resolve();
@@ -522,7 +524,8 @@ export class CopilotServer {
     /**
      * 验证 Bearer Token 认证
      *
-     * 从请求的 Authorization 头中提取 Bearer Token，与服务器生成的 Token 进行比较。
+     * 若当前未配置 Bearer Token，则直接放行。否则从请求的 Authorization 头中
+     * 提取 Bearer Token，与配置值进行比较。
      * 使用 crypto.timingSafeEqual 进行常量时间比较，防止时序攻击（timing attack）:
      * 攻击者无法通过测量响应时间来逐字符推断正确的 Token。
      *
@@ -530,6 +533,10 @@ export class CopilotServer {
      * @returns 认证通过返回 true，缺少头部/格式错误/Token 不匹配返回 false
      */
     private validateAuth(req: http.IncomingMessage): boolean {
+        if (!this.bearerToken) {
+            return true;
+        }
+
         const authHeader = req.headers.authorization;
         if (!authHeader) {
             return false;
@@ -692,6 +699,11 @@ export class CopilotServer {
         try {
             // 从模型发现服务获取当前模型池（按优先级分为 primary/secondary/fallback 三层）
             const modelPool = this.modelDiscovery.getModelPool();
+            const activeModels = [
+                ...modelPool.primary,
+                ...modelPool.secondary,
+                ...modelPool.fallback
+            ];
 
             // 构建能力描述对象，汇总服务器功能和模型统计信息
             const capabilities = {
@@ -699,21 +711,21 @@ export class CopilotServer {
                     version: '2.0.0',
                     features: {
                         dynamicModelDiscovery: true,
-                        multimodalSupport: true,
+                        multimodalSupport: false,
                         functionCalling: true,
                         realTimeModelRefresh: true
                     }
                 },
                 models: {
-                    total: modelPool.primary.length + modelPool.secondary.length + modelPool.fallback.length,
-                    withVision: modelPool.primary.filter(m => m.supportsVision).length,
-                    withTools: modelPool.primary.filter(m => m.supportsTools).length,
-                    withMultimodal: modelPool.primary.filter(m => m.supportsMultimodal).length,
-                    maxContextTokens: Math.max(...modelPool.primary.map(m => m.maxInputTokens), 0)
+                    total: activeModels.length,
+                    withVision: activeModels.filter(m => m.supportsVision).length,
+                    withTools: activeModels.filter(m => m.supportsTools).length,
+                    withMultimodal: activeModels.filter(m => m.supportsMultimodal).length,
+                    maxContextTokens: Math.max(...activeModels.map(m => m.maxInputTokens), 0)
                 },
                 supportedFormats: {
-                    images: ['jpeg', 'jpg', 'png', 'gif', 'webp'],
-                    imageInput: ['base64', 'url'],
+                    images: [],
+                    imageInput: [],
                     functions: true,
                     tools: true,
                     streaming: true
@@ -1059,6 +1071,7 @@ export class CopilotServer {
         return {
             port: config.get<number>('port', DEFAULT_CONFIG.port),
             host: config.get<string>('host', DEFAULT_CONFIG.host),
+            authToken: config.get<string>('authToken', DEFAULT_CONFIG.authToken),
             autoStart: config.get<boolean>('autoStart', DEFAULT_CONFIG.autoStart),
             enableLogging: config.get<boolean>('enableLogging', DEFAULT_CONFIG.enableLogging),
             // 并发请求数取用户配置和系统上限的较小值
@@ -1089,6 +1102,7 @@ export class CopilotServer {
             const oldConfig = this.config;
 
             this.config = newConfig;
+            this.bearerToken = newConfig.authToken.trim();
 
             logger.logServerEvent('Configuration changed', {
                 old: oldConfig,

@@ -530,18 +530,14 @@ export class FunctionCallService {
     /**
      * 获取指定模型可用的工具列表
      *
-     * 检查模型是否支持工具调用，若支持则返回注册表中所有已启用工具的函数定义。
+     * 当前 bridge 将工具能力视为提示信息而非硬拦截条件，因此这里只返回所有已启用工具。
      *
      * @param modelCapabilities - 目标模型的能力描述
      * @returns 该模型可用的函数定义数组，若模型不支持工具则返回空数组
      */
-    public getAvailableTools(modelCapabilities: ModelCapabilities): FunctionDefinition[] {
+    public getAvailableTools(_modelCapabilities: ModelCapabilities): FunctionDefinition[] {
         const tools: FunctionDefinition[] = [];
-        
-        if (!modelCapabilities.supportsTools) {
-            return tools;
-        }
-        
+
         for (const [id, entry] of this.toolRegistry) {
             if (entry.isEnabled) {
                 tools.push(entry.tool.definition);

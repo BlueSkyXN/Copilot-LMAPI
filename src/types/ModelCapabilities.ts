@@ -98,6 +98,8 @@ import type { OpenAIMessage, OpenAIToolCall } from './OpenAI';
 export interface ModelCapabilities {
     /** 模型唯一标识符（对应 VS Code LM API 的 model.id） */
     id: string;
+    /** 模型展示名称（对应 VS Code LM API 的 model.name） */
+    displayName?: string;
     /** 模型家族（如 'gpt-4o'、'claude-3.5-sonnet'） */
     family?: string;
     /** 模型提供商（如 'copilot'） */
@@ -124,6 +126,18 @@ export interface ModelCapabilities {
     supportsStreaming: boolean;
     /** 是否支持多模态输入（文本+图像混合） */
     supportsMultimodal: boolean;
+    /** 工具调用能力状态：支持 / 不支持 / 未知 */
+    toolSupportState?: 'supported' | 'unsupported' | 'unknown';
+    /** 工具调用能力来源 */
+    toolSupportSource?: string;
+    /** 视觉能力状态：支持 / 不支持 / 未知 */
+    visionSupportState?: 'supported' | 'unsupported' | 'unknown';
+    /** 视觉能力来源 */
+    visionSupportSource?: string;
+    /** 输入模态（基于当前 LM API 真正可用的传输能力） */
+    inputModalities?: string[];
+    /** 输出模态（基于当前 LM API 真正可用的传输能力） */
+    outputModalities?: string[];
     
     // -- 性能指标 --
 
@@ -135,15 +149,53 @@ export interface ModelCapabilities {
     successRate?: number;
     /** 模型当前是否健康可用 */
     isHealthy: boolean;
+    /** 当前扩展是否已获得该模型的请求权限 */
+    canSendRequest?: boolean;
     
     // -- 高级功能 --
 
     /** 支持的图片格式列表（如 ['jpeg', 'png', 'gif', 'webp']） */
     supportedImageFormats?: string[];
+    /** 支持的图片 MIME 类型列表（如 ['image/jpeg', 'image/png']） */
+    supportedMediaTypes?: string[];
     /** 单张图片的最大字节数 */
     maxImageSize?: number;
     /** 单次请求允许的最大图片数量 */
     maxImagesPerRequest?: number;
+    /** 非流式请求允许的最大输出令牌数 */
+    maxNonStreamingOutputTokens?: number;
+    /** 是否支持 reasoning / thinking 类能力 */
+    supportsReasoning?: boolean;
+    /** 是否支持 reasoning_effort 档位控制 */
+    supportsReasoningEffort?: boolean;
+    /** reasoning_effort 可选值 */
+    reasoningEffortValues?: string[];
+    /** thinking 的最小预算 */
+    minThinkingBudget?: number;
+    /** thinking 的最大预算 */
+    maxThinkingBudget?: number;
+    /** 是否支持自适应思考 */
+    supportsAdaptiveThinking?: boolean;
+    /** 是否支持并行工具调用 */
+    supportsParallelToolCalls?: boolean;
+    /** 是否支持结构化输出 */
+    supportsStructuredOutputs?: boolean;
+    /** 官方声明的支持端点列表 */
+    supportedEndpoints?: string[];
+    /** tokenizer 名称 */
+    tokenizer?: string;
+    /** 模型选择器分类 */
+    modelPickerCategory?: string;
+    /** 是否在模型选择器中显示 */
+    modelPickerEnabled?: boolean;
+    /** 是否为聊天默认模型 */
+    isChatDefault?: boolean;
+    /** 是否为聊天 fallback 模型 */
+    isChatFallback?: boolean;
+    /** 是否为预览模型 */
+    preview?: boolean;
+    /** 能力元数据来源 */
+    metadataSource?: 'lmapi-direct' | 'lmapi-observed';
     
     // -- VS Code 模型引用 --
 

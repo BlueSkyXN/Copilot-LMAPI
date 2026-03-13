@@ -277,6 +277,14 @@ export interface OpenAICompletionRequest {
     tools?: OpenAITool[];
     /** 工具调用控制（现代格式） */
     tool_choice?: OpenAIToolChoice;
+    /** 非标准扩展：桥接层私有控制项 */
+    x_lmapi?: {
+        /**
+         * 追加到 VS Code `LanguageModelChatRequestOptions.modelOptions` 的桥接层扩展参数。
+         * 当前仅允许补充桥已知的保守子集；未知键会被过滤，避免底层 provider 因未知参数拒绝请求。
+         */
+        model_options?: Record<string, unknown>;
+    };
 }
 
 /**
@@ -442,6 +450,76 @@ export interface OpenAIModel {
     root?: string;
     /** 父模型标识符（可选） */
     parent?: string;
+    /** 非标准扩展：LMAPI 能力与限制信息 */
+    x_lmapi?: {
+        display_name?: string;
+        family?: string;
+        vendor?: string;
+        version?: string;
+        metadata_source?: 'lmapi-direct' | 'lmapi-observed';
+        request_access?: boolean;
+        input_modalities?: string[];
+        output_modalities?: string[];
+        tokenizer?: string;
+        supported_endpoints?: string[];
+        model_picker_category?: string;
+        model_picker_enabled?: boolean;
+        is_chat_default?: boolean;
+        is_chat_fallback?: boolean;
+        preview?: boolean;
+        capabilities: {
+            tools: boolean;
+            vision: boolean;
+            streaming: boolean;
+            multimodal: boolean;
+            reasoning: boolean;
+            reasoning_effort: string[];
+            adaptive_thinking: boolean;
+            parallel_tool_calls: boolean;
+            structured_outputs: boolean;
+        };
+        capability_states: {
+            tools: 'supported' | 'unsupported' | 'unknown';
+            vision: 'supported' | 'unsupported' | 'unknown';
+            reasoning: 'supported' | 'unsupported' | 'unknown';
+            adaptive_thinking: 'supported' | 'unsupported' | 'unknown';
+            parallel_tool_calls: 'supported' | 'unsupported' | 'unknown';
+            structured_outputs: 'supported' | 'unsupported' | 'unknown';
+        };
+        capability_sources: {
+            tools: string;
+            vision: string;
+            reasoning: string;
+            adaptive_thinking: string;
+            parallel_tool_calls: string;
+            structured_outputs: string;
+        };
+        limits: {
+            context_window_tokens: number;
+            max_input_tokens: number;
+            max_output_tokens?: number;
+            max_non_streaming_output_tokens?: number;
+            max_images_per_request?: number;
+            max_image_size?: number;
+            supported_image_formats?: string[];
+            supported_media_types?: string[];
+            min_thinking_budget?: number;
+            max_thinking_budget?: number;
+        };
+        limit_sources: {
+            context_window_tokens: string;
+            max_input_tokens: string;
+            max_output_tokens: string;
+            max_non_streaming_output_tokens: string;
+            max_images_per_request: string;
+            max_image_size: string;
+            supported_image_formats: string;
+            supported_media_types: string;
+            min_thinking_budget: string;
+            max_thinking_budget: string;
+        };
+        notes?: string[];
+    };
 }
 
 /**

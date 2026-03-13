@@ -119,6 +119,8 @@ export const DEFAULT_CONFIG = {
     port: 8001,
     /** HTTP 服务器绑定地址, 默认仅本地访问 */
     host: '127.0.0.1',
+    /** 可选固定 Bearer Token；为空时关闭 HTTP 鉴权 */
+    authToken: '',
     /** 是否在扩展激活时自动启动服务器 */
     autoStart: false,
     /** 是否启用日志输出 */

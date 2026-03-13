@@ -133,6 +133,7 @@ import {
     ToolCall
 } from '../types/ModelCapabilities';
 import {
+    OpenAICompletionRequest,
     OpenAIFunctionCallChoice,
     OpenAITool,
     OpenAIToolChoice,
@@ -221,6 +222,9 @@ export class Validator {
         const validatedToolChoice = request.tool_choice !== undefined
             ? this.validateToolChoice(request.tool_choice, availableToolNames)
             : undefined;
+        const validatedXLMAPI = request.x_lmapi !== undefined
+            ? this.validateLMAPIExtension(request.x_lmapi)
+            : undefined;
         
         // 构建已验证的请求
         const validatedRequest: ValidatedRequest = {
@@ -264,8 +268,41 @@ export class Validator {
         if (validatedToolChoice !== undefined) {
             validatedRequest.tool_choice = validatedToolChoice;
         }
+        if (validatedXLMAPI !== undefined) {
+            validatedRequest.x_lmapi = validatedXLMAPI;
+        }
         
         return validatedRequest;
+    }
+
+    /**
+     * 验证桥接层私有扩展字段 `x_lmapi`
+     *
+     * 当前仅允许 `model_options` 为普通对象，用于透传到 VS Code LM API 的
+     * `LanguageModelChatRequestOptions.modelOptions`。
+     */
+    private static validateLMAPIExtension(
+        extension: unknown
+    ): NonNullable<OpenAICompletionRequest['x_lmapi']> {
+        if (!extension || typeof extension !== 'object' || Array.isArray(extension)) {
+            throw new ValidationError('x_lmapi must be an object', ERROR_CODES.INVALID_REQUEST, 'x_lmapi');
+        }
+
+        const raw = extension as Record<string, unknown>;
+        const validated: NonNullable<OpenAICompletionRequest['x_lmapi']> = {};
+
+        if (raw.model_options !== undefined) {
+            if (!raw.model_options || typeof raw.model_options !== 'object' || Array.isArray(raw.model_options)) {
+                throw new ValidationError(
+                    'x_lmapi.model_options must be an object',
+                    ERROR_CODES.INVALID_REQUEST,
+                    'x_lmapi.model_options'
+                );
+            }
+            validated.model_options = raw.model_options as Record<string, unknown>;
+        }
+
+        return validated;
     }
     
     /**
@@ -1024,8 +1061,8 @@ export class Validator {
     /**
      * 验证 max_tokens 参数（结合动态模型上下文）
      *
-     * 检查 max_tokens 为正整数，并在提供了模型能力信息时，
-     * 根据模型的 maxOutputTokens（或 maxInputTokens 的 50%）进行上限校验。
+     * 检查 max_tokens 为正整数，并在提供了模型能力信息且模型显式暴露
+     * maxOutputTokens 时进行上限校验。
      *
      * @param maxTokens - 待验证的 max_tokens 值
      * @param selectedModel - 选定模型的能力信息（可选，用于上限校验）
@@ -1046,8 +1083,8 @@ export class Validator {
         }
         
         // 基于选定模型的动态验证
-        if (selectedModel) {
-            const modelLimit = selectedModel.maxOutputTokens || selectedModel.maxInputTokens * 0.5;
+        if (selectedModel?.maxOutputTokens !== undefined) {
+            const modelLimit = selectedModel.maxOutputTokens;
             if (maxTokens > modelLimit) {
                 throw new ValidationError(
                     `max_tokens cannot exceed ${Math.floor(modelLimit)} for model ${selectedModel.id}`,

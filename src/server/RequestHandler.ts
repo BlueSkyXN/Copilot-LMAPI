@@ -390,6 +390,7 @@ export class RequestHandler {
             const tools: OpenAITool[] = requestData.tools || [];
             const toolChoice = requestData.tool_choice;
             const functionCall = requestData.function_call;
+            const sanitizedModelOptions = this.buildModelOptions(requestData, requestLogger);
             // 当只提供了旧版 functions 而未提供 tools 时，优先使用旧版函数调用格式响应
             const preferLegacyFunctionCall = functions.length > 0 && tools.length === 0;
             // 判断是否为强制工具调用模式（required 或指定具体工具），此模式下不允许自动降级
@@ -403,7 +404,8 @@ export class RequestHandler {
                 messageCount: messages.length,
                 hasImages: messages.some(m => Array.isArray(m.content) && 
                     m.content.some(p => p.type === 'image_url')),
-                hasFunctions: functions.length > 0 || tools.length > 0
+                hasFunctions: functions.length > 0 || tools.length > 0,
+                hasModelOptions: !!sanitizedModelOptions
             });
             
             // 创建增强请求上下文，用于贯穿整个请求处理链路
@@ -531,6 +533,9 @@ export class RequestHandler {
                 
                 // 构建请求选项：仅在有工具定义时才附加工具和工具模式
                 const requestOptions: vscode.LanguageModelChatRequestOptions = {};
+                if (sanitizedModelOptions) {
+                    requestOptions.modelOptions = sanitizedModelOptions;
+                }
                 if (vsCodeTools.length > 0) {
                     requestOptions.tools = vsCodeTools;
                 }
@@ -578,7 +583,7 @@ export class RequestHandler {
                 try {
                     // 发送 LM 请求，支持工具模式出错时的自动降级重试
                     // allowToolFallback 仅在有工具且非强制模式时为 true
-                    const response = await this.sendRequestWithToolFallback(
+                    const sendResult = await this.sendRequestWithToolFallback(
                         selectedModel.vsCodeModel,
                         vsCodeMessages,
                         requestOptions,
@@ -586,6 +591,10 @@ export class RequestHandler {
                         requestLogger,
                         allowToolFallback
                     );
+                    let toolCompatibilityObservation: 'supported' | 'unsupported' | undefined =
+                        sendResult.toolCompatibilityObservation;
+                    let usedPreHeaderToolFallback = false;
+                    const response = sendResult.response;
                     
                     // 根据客户端请求的 stream 参数选择流式或非流式响应处理
                     if (isStream) {
@@ -611,10 +620,16 @@ export class RequestHandler {
                                 'Tool-enabled LM stream failed before headers were sent, retrying once without tools',
                                 { error: this.stringifyError(responseError) }
                             );
+                            usedPreHeaderToolFallback = true;
 
+                            // 在 pre-header 降级路径中同时去掉 modelOptions，减少重试时
+                            // 因不相关的 modelOptions 兼容性问题再次失败的概率
+                            const preHeaderFallbackOptions = this.withoutToolsRequestOptions(
+                                this.withoutModelOptionsRequestOptions(requestOptions)
+                            );
                             const fallbackResponse = await selectedModel.vsCodeModel.sendRequest(
                                 toolFallbackMessages,
-                                this.withoutToolsRequestOptions(requestOptions),
+                                preHeaderFallbackOptions,
                                 requestCancellation.token
                             );
 
@@ -651,10 +666,14 @@ export class RequestHandler {
                                 'Tool-enabled LM response processing failed before headers were sent, retrying once without tools',
                                 { error: this.stringifyError(responseError) }
                             );
+                            usedPreHeaderToolFallback = true;
 
+                            const preHeaderFallbackOptions = this.withoutToolsRequestOptions(
+                                this.withoutModelOptionsRequestOptions(requestOptions)
+                            );
                             const fallbackResponse = await selectedModel.vsCodeModel.sendRequest(
                                 toolFallbackMessages,
-                                this.withoutToolsRequestOptions(requestOptions),
+                                preHeaderFallbackOptions,
                                 requestCancellation.token
                             );
 
@@ -669,6 +688,18 @@ export class RequestHandler {
                             );
                         }
                     }
+
+                    if (vsCodeTools.length > 0) {
+                        if (!toolCompatibilityObservation && !usedPreHeaderToolFallback) {
+                            toolCompatibilityObservation = 'supported';
+                        }
+                        if (toolCompatibilityObservation) {
+                            this.modelDiscovery.recordToolCallingObservation(
+                                selectedModel.id,
+                                toolCompatibilityObservation
+                            );
+                        }
+                    }
                 } finally {
                     // 清理事件监听器和取消令牌，防止资源泄漏
                     req.removeListener('aborted', cancelOnAborted);
@@ -679,9 +710,13 @@ export class RequestHandler {
                 
             } catch (lmError) {
                 requestLogger.error('VS Code LM API error:', lmError as Error);
+                const likelyToolModeError = vsCodeTools.length > 0 && this.isLikelyToolModeError(lmError);
+                if (likelyToolModeError) {
+                    this.modelDiscovery.recordToolCallingObservation(selectedModel.id, 'unsupported');
+                }
 
                 // 强制工具模式下的工具模式错误，返回明确的 400 错误
-                if (requiresToolCall && vsCodeTools.length > 0 && this.isLikelyToolModeError(lmError)) {
+                if (requiresToolCall && likelyToolModeError) {
                     this.sendErrorResponse(
                         res,
                         HTTP_STATUS.BAD_REQUEST,
@@ -836,20 +871,25 @@ export class RequestHandler {
         try {
             const modelPool = this.modelDiscovery.getModelPool();
             const toolStats = this.functionService.getToolStats();
+            const activeModels = [
+                ...modelPool.primary,
+                ...modelPool.secondary,
+                ...modelPool.fallback
+            ];
             
             const status = {
                 server: serverState,
                 models: {
-                    total: modelPool.primary.length + modelPool.secondary.length + modelPool.fallback.length,
+                    total: activeModels.length,
                     primary: modelPool.primary.length,
                     secondary: modelPool.secondary.length,
                     fallback: modelPool.fallback.length,
                     unhealthy: modelPool.unhealthy.length,
                     lastUpdated: modelPool.lastUpdated.toISOString(),
                     capabilities: {
-                        vision: modelPool.primary.filter(m => m.supportsVision).length,
-                        tools: modelPool.primary.filter(m => m.supportsTools).length,
-                        multimodal: modelPool.primary.filter(m => m.supportsMultimodal).length
+                        vision: activeModels.filter(m => m.supportsVision).length,
+                        tools: activeModels.filter(m => m.supportsTools).length,
+                        multimodal: activeModels.filter(m => m.supportsMultimodal).length
                     }
                 },
                 tools: {
@@ -858,7 +898,7 @@ export class RequestHandler {
                 },
                 features: {
                     dynamicModelDiscovery: true,
-                    multimodalSupport: true,
+                    multimodalSupport: false,
                     functionCalling: true,
                     noHardcodedLimitations: true,
                     loadBalancing: false
@@ -1165,6 +1205,114 @@ export class RequestHandler {
     }
 
     /**
+     * 去掉 modelOptions 配置，复用在“未知/不兼容参数降级重试”路径。
+     */
+    private withoutModelOptionsRequestOptions(
+        requestOptions: vscode.LanguageModelChatRequestOptions
+    ): vscode.LanguageModelChatRequestOptions {
+        return {
+            ...requestOptions,
+            modelOptions: undefined
+        };
+    }
+
+    /**
+     * 从标准 OpenAI 控制项和 `x_lmapi.model_options` 组装一份保守的 LMAPI modelOptions。
+     *
+     * 设计原则：
+     * - 顶层标准字段优先于 `x_lmapi.model_options` 中的同名项
+     * - 仅转发当前桥可以自证安全/兼容的有限白名单
+     * - 未知键直接过滤，避免 provider 因未知参数拒绝请求
+     */
+    private buildModelOptions(
+        requestData: ValidatedRequest,
+        requestLogger: RequestLogger
+    ): Record<string, string | number | boolean | string[]> | undefined {
+        const candidateOptions: Record<string, unknown> = {
+            ...(requestData.x_lmapi?.model_options ?? {})
+        };
+
+        if (requestData.stop !== undefined) {
+            candidateOptions.stop = requestData.stop;
+        }
+        if (requestData.temperature !== undefined) {
+            candidateOptions.temperature = requestData.temperature;
+        }
+        if (requestData.max_tokens !== undefined) {
+            candidateOptions.max_tokens = requestData.max_tokens;
+        }
+        if (requestData.frequency_penalty !== undefined) {
+            candidateOptions.frequency_penalty = requestData.frequency_penalty;
+        }
+        if (requestData.presence_penalty !== undefined) {
+            candidateOptions.presence_penalty = requestData.presence_penalty;
+        }
+
+        if (Object.keys(candidateOptions).length === 0) {
+            return undefined;
+        }
+
+        return this.sanitizeModelOptions(candidateOptions, requestLogger);
+    }
+
+    /**
+     * 过滤并规范化可转发到 VS Code LM API 的 modelOptions。
+     *
+     * 当前仅保留公开生态中可见、且本桥能够稳定表达的保守子集。
+     */
+    private sanitizeModelOptions(
+        candidateOptions: Record<string, unknown>,
+        requestLogger: RequestLogger
+    ): Record<string, string | number | boolean | string[]> | undefined {
+        const sanitized: Record<string, string | number | boolean | string[]> = {};
+        const droppedKeys: string[] = [];
+        const validators: Record<string, (value: unknown) => boolean> = {
+            stop: (value: unknown) =>
+                typeof value === 'string' ||
+                (Array.isArray(value) && value.every(item => typeof item === 'string')),
+            temperature: (value: unknown) => typeof value === 'number' && Number.isFinite(value),
+            max_tokens: (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value > 0,
+            frequency_penalty: (value: unknown) => typeof value === 'number' && Number.isFinite(value),
+            presence_penalty: (value: unknown) => typeof value === 'number' && Number.isFinite(value)
+        };
+
+        for (const [key, value] of Object.entries(candidateOptions)) {
+            const validate = validators[key];
+            if (!validate || !validate(value)) {
+                droppedKeys.push(key);
+                continue;
+            }
+
+            if (
+                typeof value === 'string' ||
+                typeof value === 'number' ||
+                typeof value === 'boolean' ||
+                (Array.isArray(value) && value.every(item => typeof item === 'string'))
+            ) {
+                sanitized[key] = value;
+            } else {
+                droppedKeys.push(key);
+            }
+        }
+
+        if (droppedKeys.length > 0) {
+            requestLogger.warn('Dropping unsupported modelOptions before LM request', {
+                droppedKeys
+            });
+        }
+
+        if (Object.keys(sanitized).length === 0) {
+            return undefined;
+        }
+
+        requestLogger.debug('Prepared LM modelOptions for request', {
+            forwardedKeys: Object.keys(sanitized)
+        });
+
+        return sanitized;
+    }
+
+    /**
      * 发送 LM 请求，支持工具模式出错时的自动降级重试
      *
      * 当满足以下条件时，会自动去除工具配置重试一次：
@@ -1191,15 +1339,21 @@ export class RequestHandler {
         token: vscode.CancellationToken,
         requestLogger: RequestLogger,
         allowToolFallback: boolean
-    ): Promise<vscode.LanguageModelChatResponse> {
+    ): Promise<{
+        response: vscode.LanguageModelChatResponse;
+        toolCompatibilityObservation?: 'unsupported';
+        modelOptionsCompatibilityObservation?: 'unsupported';
+    }> {
         const toolCount = Array.isArray(requestOptions.tools) ? requestOptions.tools.length : 0;
+        const hasModelOptions = !!requestOptions.modelOptions && Object.keys(requestOptions.modelOptions).length > 0;
 
         try {
             requestLogger.debug('LM request with tool settings:', {
                 model: model.id,
                 toolCount,
                 toolMode: requestOptions.toolMode ?? 'none',
-                allowToolFallback
+                allowToolFallback,
+                modelOptionsKeys: hasModelOptions ? Object.keys(requestOptions.modelOptions ?? {}) : []
             });
 
             // 首次尝试：带工具配置发送请求
@@ -1207,47 +1361,97 @@ export class RequestHandler {
             requestLogger.debug('LM request accepted by VS Code LM API:', {
                 model: model.id,
                 toolCount,
-                toolMode: requestOptions.toolMode ?? 'none'
+                toolMode: requestOptions.toolMode ?? 'none',
+                modelOptionsKeys: hasModelOptions ? Object.keys(requestOptions.modelOptions ?? {}) : []
             });
-            return response;
+            return { response };
         } catch (error) {
             // 检查是否满足降级条件
             const hasTools = toolCount > 0;
             const likelyToolError = this.isLikelyToolModeError(error);
+            const likelyModelOptionsError = hasModelOptions && this.isLikelyModelOptionsError(error);
 
-            requestLogger.info('LM tool failure analysis:', {
+            requestLogger.info('LM request compatibility failure analysis:', {
                 model: model.id,
                 toolCount,
                 toolMode: requestOptions.toolMode ?? 'none',
+                hasModelOptions,
                 allowToolFallback,
                 tokenCancelled: token.isCancellationRequested,
                 likelyToolError,
+                likelyModelOptionsError,
                 error: this.stringifyError(error)
             });
 
-            if (
-                !allowToolFallback ||
-                !hasTools ||
-                token.isCancellationRequested ||
-                !likelyToolError
-            ) {
-                // 不满足降级条件，直接抛出原始错误
+            if (token.isCancellationRequested) {
                 throw error;
             }
 
-            requestLogger.warn('LM request with tools failed due probable tool-mode incompatibility, retrying once without tools', {
-                error: String(error)
-            });
+            const fallbackAttempts: Array<{
+                label: string;
+                options: vscode.LanguageModelChatRequestOptions;
+                toolCompatibilityObservation?: 'unsupported';
+                modelOptionsCompatibilityObservation?: 'unsupported';
+            }> = [];
 
-            // 降级重试：移除工具和工具模式配置，仅保留其他选项
-            const fallbackOptions = this.withoutToolsRequestOptions(requestOptions);
-
-            try {
-                return await model.sendRequest(messages, fallbackOptions, token);
-            } catch (fallbackError) {
-                requestLogger.error('LM fallback request without tools also failed', fallbackError as Error);
-                throw fallbackError;
+            if (likelyModelOptionsError && hasModelOptions) {
+                fallbackAttempts.push({
+                    label: 'without modelOptions',
+                    options: this.withoutModelOptionsRequestOptions(requestOptions),
+                    modelOptionsCompatibilityObservation: 'unsupported'
+                });
             }
+
+            if (allowToolFallback && hasTools && likelyToolError) {
+                fallbackAttempts.push({
+                    label: 'without tools',
+                    options: this.withoutToolsRequestOptions(requestOptions),
+                    toolCompatibilityObservation: 'unsupported'
+                });
+            }
+
+            // 仅在两种错误类型同时存在、或只有一种类型但对应的单项降级可能不够时，
+            // 才追加"去掉所有可选项"的兜底尝试
+            if (
+                allowToolFallback &&
+                hasTools &&
+                hasModelOptions &&
+                likelyToolError &&
+                likelyModelOptionsError
+            ) {
+                fallbackAttempts.push({
+                    label: 'without tools or modelOptions',
+                    options: this.withoutToolsRequestOptions(
+                        this.withoutModelOptionsRequestOptions(requestOptions)
+                    ),
+                    toolCompatibilityObservation: 'unsupported',
+                    modelOptionsCompatibilityObservation: 'unsupported'
+                });
+            }
+
+            if (fallbackAttempts.length === 0) {
+                throw error;
+            }
+
+            let lastError: unknown = error;
+            for (const attempt of fallbackAttempts) {
+                requestLogger.warn(`LM request failed due probable compatibility issue, retrying once ${attempt.label}`, {
+                    error: this.stringifyError(lastError)
+                });
+
+                try {
+                    return {
+                        response: await model.sendRequest(messages, attempt.options, token),
+                        toolCompatibilityObservation: attempt.toolCompatibilityObservation,
+                        modelOptionsCompatibilityObservation: attempt.modelOptionsCompatibilityObservation
+                    };
+                } catch (fallbackError) {
+                    requestLogger.error(`LM fallback request ${attempt.label} also failed`, fallbackError as Error);
+                    lastError = fallbackError;
+                }
+            }
+
+            throw lastError;
         }
     }
 
@@ -1272,6 +1476,25 @@ export class RequestHandler {
             message.includes('does not support function') ||
             message.includes('function call is not supported') ||
             /\btool\s*(call|use|invocation)\b/.test(message)
+        );
+    }
+
+    /**
+     * 判断错误是否可能由不兼容或未知的 modelOptions 触发。
+     *
+     * 仅匹配明确提及 modelOptions / model_options / 请求选项级参数的错误关键词，
+     * 避免把通用的 "invalid parameter"（可能来自工具参数校验等场景）误判为
+     * modelOptions 不兼容。
+     */
+    private isLikelyModelOptionsError(error: unknown): boolean {
+        const message = this.stringifyError(error).toLowerCase();
+        return (
+            message.includes('modeloptions') ||
+            message.includes('model_options') ||
+            message.includes('model options') ||
+            /\bunsupported\s+(request\s+)?option/i.test(message) ||
+            /\bunknown\s+(request\s+)?option/i.test(message) ||
+            /\binvalid\s+(request\s+)?option/i.test(message)
         );
     }
 

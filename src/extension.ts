@@ -109,7 +109,7 @@ export function activate(context: vscode.ExtensionContext) {
     logger.info('Copilot-LMAPI extension activating');
 
     // 初始化服务器
-    server = new CopilotServer();
+    server = new CopilotServer(context);
 
     // 创建状态栏项目
     statusBarItem = vscode.window.createStatusBarItem(

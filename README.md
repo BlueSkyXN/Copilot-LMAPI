@@ -6,7 +6,7 @@
 
 - **OpenAI 兼容 API**：完全兼容 OpenAI Chat Completions API
 - **动态模型发现**：实时发现所有可用的 Copilot 模型，无硬编码限制
-- **多模态支持**：支持文本和图像输入，支持 Base64 与 URL 图像输入
+- **LMAPI 直出模型元数据**：`/v1/models` 仅基于 VS Code LM API 实时返回的模型对象与运行时观测构建
 - **函数/工具调用**：完整支持 OpenAI 函数调用规范
 - **显式模型直连**：严格使用请求中指定的模型，不做隐式自动切换
 - **流式响应支持**：通过 Server-Sent Events 实现实时流式响应
@@ -33,6 +33,7 @@
 {
     "copilot-lmapi.port": 8001,
     "copilot-lmapi.host": "127.0.0.1",
+    "copilot-lmapi.authToken": "",
     "copilot-lmapi.autoStart": false,
     "copilot-lmapi.enableLogging": true,
     "copilot-lmapi.maxConcurrentRequests": 10,
@@ -48,6 +49,7 @@
 |--------|------|--------|------|
 | `port` | number | `8001` | HTTP 服务器端口 (1024-65535) |
 | `host` | string | `"127.0.0.1"` | 服务器主机地址（仅本地访问）|
+| `authToken` | string | `""` | 可选固定 Bearer Token；留空时关闭 HTTP 鉴权 |
 | `autoStart` | boolean | `false` | VS Code 启动时自动启动服务器 |
 | `enableLogging` | boolean | `true` | 启用详细日志记录 |
 | `maxConcurrentRequests` | number | `10` | 最大并发请求数 |
@@ -67,13 +69,18 @@
 
 ### 认证方式
 
-除 `/health` 和 `OPTIONS` 预检请求外，接口需要携带 Bearer Token：
+默认情况下，`copilot-lmapi.authToken` 为空，HTTP 鉴权关闭：
+
+- 所有接口（包括 `/v1/models`、`/status`、`/v1/capabilities`）都允许无 `Authorization` 请求
+- 即使客户端传了任意 `Authorization: Bearer <anything>`，也不会被拦截
+
+如果你在设置里把 `copilot-lmapi.authToken` 设成非空字符串，则除 `/health` 和 `OPTIONS` 预检请求外，其余接口都需要携带精确匹配的 Bearer Token：
 
 ```http
-Authorization: Bearer <server-start-token>
+Authorization: Bearer <your-configured-auth-token>
 ```
 
-Token 会在服务启动时显示在 VS Code 提示信息中。
+服务启动时会在 VS Code 提示信息中显示当前认证模式（禁用或固定 Token）。
 
 #### 聊天完成
 ```
@@ -82,11 +89,15 @@ POST /v1/chat/completions
 
 完全兼容 OpenAI Chat Completions API，包括：
 - 流式和非流式响应
-- 多模态输入（文本 + 图像）
 - 函数/工具调用（含多轮 tool_calls 往返）
 - Temperature、top_p、max_tokens 参数
 - 停止序列
 - 存在和频率惩罚
+
+当前说明：
+- `image_url` 请求体结构仍可被 bridge 接收；当前实现不会因为模型提示缺少 vision 而拦截请求，而是统一退化为文本描述上下文后继续尝试调用模型。
+- 当前版本仍未把 `image_url` 映射为原生 image part，因此 `/v1/models` 只有在未来接上真实 image part 传输后才会把模型声明为真正的 vision / multimodal。
+- bridge 会把一组保守的生成控制项（当前包括 `stop` / `temperature` / `max_tokens` / `presence_penalty` / `frequency_penalty`）整理为 VS Code LM API `modelOptions`；`x_lmapi.model_options` 仅能补充这一受限子集，未知键会被过滤，若 runtime 仍拒绝这些 `modelOptions`，bridge 会在响应头发送前自动去掉它们重试一次。
 
 工具调用兼容细节：
 - 支持现代 `tools` + `tool_choice`（`none` / `auto` / `required` / 指定函数）
@@ -101,9 +112,21 @@ POST /v1/chat/completions
 GET /v1/models
 ```
 
-动态返回当前 Copilot 环境中所有可用的模型列表，包括每个模型的能力信息（视觉支持、工具调用、流式响应等）。
+动态返回当前 Copilot 环境中所有可用的模型列表。
 
-说明：`supportsVision` / `supportsTools` 为基于模型标识的保守探测结果，用于能力展示与路由提示；实际可用性以运行时请求结果为准。
+说明：
+- 标准字段保持 OpenAI `GET /v1/models` 兼容。
+- 每个模型额外返回 `x_lmapi` 扩展对象，补充：
+  - `display_name` / `family` / `vendor` / `version`
+  - `request_access`：是否已获得当前扩展对该模型的发送权限
+- `capabilities`：当前 bridge 已确认可用的能力布尔值
+- `capability_states` / `capability_sources`：把 `supported / unsupported / unknown` 与来源拆开，避免把未知误报成不支持
+- `limits` / `limit_sources`：只输出 LMAPI 真实暴露或运行时观测到的限制，并标明来源；拿不到的字段会明确标成 `not-exposed-by-lmapi`
+- 模型能力来源为 **VS Code LM API `selectChatModels()` 直出字段 + 当前扩展的运行时观测**，不再使用内置官方网页模型 metadata registry。
+- `tools` / `vision` 能力在当前 bridge 中仅作为提示信息，不作为请求前硬拦截条件；真实请求始终优先尝试，再由 runtime / provider 给出成功或失败。
+- 对同一 `id` 的多 vendor 变体会先去重，再输出到 `/v1/models` 和内部模型池，避免重复项放大统计结果。
+- 本仓库当前依赖的是 VS Code `^1.92.0` 稳定类型面：稳定面包含 `tools` / `toolMode` / `modelOptions`，但不包含稳定的消费者侧模型 `capabilities`、推理强度或 thinking budget 控制字段。
+- 官方仓库中存在 proposed `LanguageModelChat.capabilities` 与 `LanguageModelThinkingPart`，但它们不属于本仓库当前稳定类型面；因此 `/v1/models` 中与 reasoning 相关的字段默认保持 `unknown`，除非未来接入了真实 runtime 观测。
 
 常见模型包括：gpt-4o, claude-3.5-sonnet, gpt-4.1, claude-sonnet-4, gemini-2.0-flash-001, gemini-2.5-pro, o3-mini, o4-mini
 

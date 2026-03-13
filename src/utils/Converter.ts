@@ -382,7 +382,7 @@ export class Converter {
      */
     private static async convertMultimodalMessage(
         message: EnhancedMessage,
-        selectedModel: ModelCapabilities
+        _selectedModel: ModelCapabilities
     ): Promise<vscode.LanguageModelChatMessage | null> {
         
         if (!Array.isArray(message.content)) {
@@ -397,23 +397,16 @@ export class Converter {
                 textContent += part.text;
                 
             } else if (part.type === 'image_url' && part.image_url) {
-                
-                // 如果模型支持视觉则处理图像
-                if (selectedModel.supportsVision) {
-                    try {
-                        const imageContent = await this.processImageContent(part.image_url.url);
-                        if (imageContent) {
-                            textContent += `\n[Image: ${imageContent.description}]\n`;
-                            // 注意：VS Code LM API 可能以不同方式处理图像
-                            // 目前这是一个文本表示
-                        }
-                    } catch (error) {
-                        logger.warn(`处理图像失败：`, error as Error);
+                try {
+                    const imageContent = await this.processImageContent(part.image_url.url);
+                    if (imageContent) {
+                        textContent += `\n[Image: ${imageContent.description}]\n`;
+                    } else {
                         textContent += `\n[Image: ${part.image_url.url}]\n`;
                     }
-                } else {
-                    logger.warn(`模型 ${selectedModel.id} 不支持视觉，跳过图像`);
-                    textContent += `\n[所选模型不支持图像]\n`;
+                } catch (error) {
+                    logger.warn(`处理图像失败：`, error as Error);
+                    textContent += `\n[Image: ${part.image_url.url}]\n`;
                 }
             }
         }
@@ -836,6 +829,7 @@ export class Converter {
             object: 'model',
             created: now,
             owned_by: model.vendor || 'vs-code',
+            root: model.family || model.id,
             // 添加关于能力的自定义元数据
             permission: [{
                 id: `perm-${model.id}`,
@@ -849,7 +843,82 @@ export class Converter {
                 allow_fine_tuning: false,
                 organization: model.vendor || 'vs-code',
                 is_blocking: false
-            }]
+            }],
+            x_lmapi: {
+                display_name: model.displayName,
+                family: model.family,
+                vendor: model.vendor,
+                version: model.version,
+                metadata_source: model.metadataSource,
+                request_access: model.canSendRequest,
+                input_modalities: model.inputModalities ?? ['text'],
+                output_modalities: model.outputModalities ?? ['text'],
+                tokenizer: model.tokenizer,
+                supported_endpoints: model.supportedEndpoints ?? ['/v1/chat/completions', '/v1/models'],
+                model_picker_category: model.modelPickerCategory,
+                model_picker_enabled: model.modelPickerEnabled,
+                is_chat_default: model.isChatDefault,
+                is_chat_fallback: model.isChatFallback,
+                preview: model.preview,
+                capabilities: {
+                    tools: model.supportsTools,
+                    vision: model.supportsVision,
+                    streaming: model.supportsStreaming,
+                    multimodal: model.supportsMultimodal,
+                    reasoning: model.supportsReasoning ?? false,
+                    reasoning_effort: model.reasoningEffortValues ?? [],
+                    adaptive_thinking: model.supportsAdaptiveThinking ?? false,
+                    parallel_tool_calls: model.supportsParallelToolCalls ?? false,
+                    structured_outputs: model.supportsStructuredOutputs ?? false
+                },
+                capability_states: {
+                    tools: model.toolSupportState ?? 'unknown',
+                    vision: model.visionSupportState ?? 'unknown',
+                    reasoning: model.supportsReasoning === true ? 'supported' : 'unknown',
+                    adaptive_thinking: model.supportsAdaptiveThinking === true ? 'supported' : 'unknown',
+                    parallel_tool_calls: model.supportsParallelToolCalls === true ? 'supported' : 'unknown',
+                    structured_outputs: model.supportsStructuredOutputs === true ? 'supported' : 'unknown'
+                },
+                capability_sources: {
+                    tools: model.toolSupportSource ?? 'not-exposed-by-lmapi',
+                    vision: model.visionSupportSource ?? 'not-exposed-by-lmapi',
+                    reasoning: model.supportsReasoning === true ? 'lmapi-runtime-observation' : 'not-exposed-by-lmapi',
+                    adaptive_thinking: model.supportsAdaptiveThinking === true ? 'lmapi-runtime-observation' : 'not-exposed-by-lmapi',
+                    parallel_tool_calls: model.supportsParallelToolCalls === true ? 'lmapi-runtime-observation' : 'not-exposed-by-lmapi',
+                    structured_outputs: model.supportsStructuredOutputs === true ? 'lmapi-runtime-observation' : 'not-exposed-by-lmapi'
+                },
+                limits: {
+                    context_window_tokens: model.contextWindow,
+                    max_input_tokens: model.maxInputTokens,
+                    max_output_tokens: model.maxOutputTokens,
+                    max_non_streaming_output_tokens: model.maxNonStreamingOutputTokens,
+                    max_images_per_request: model.maxImagesPerRequest,
+                    max_image_size: model.maxImageSize,
+                    supported_image_formats: model.supportedImageFormats,
+                    supported_media_types: model.supportedMediaTypes,
+                    min_thinking_budget: model.minThinkingBudget,
+                    max_thinking_budget: model.maxThinkingBudget
+                },
+                limit_sources: {
+                    context_window_tokens: 'lmapi-selectChatModels',
+                    max_input_tokens: 'lmapi-selectChatModels',
+                    max_output_tokens: model.maxOutputTokens !== undefined ? 'lmapi-runtime-observation' : 'not-exposed-by-lmapi',
+                    max_non_streaming_output_tokens: model.maxNonStreamingOutputTokens !== undefined ? 'lmapi-runtime-observation' : 'not-exposed-by-lmapi',
+                    max_images_per_request: model.maxImagesPerRequest !== undefined ? 'lmapi-runtime-observation' : 'not-exposed-by-lmapi',
+                    max_image_size: model.maxImageSize !== undefined ? 'lmapi-runtime-observation' : 'not-exposed-by-lmapi',
+                    supported_image_formats: model.supportedImageFormats?.length ? 'lmapi-runtime-observation' : 'not-exposed-by-lmapi',
+                    supported_media_types: model.supportedMediaTypes?.length ? 'lmapi-runtime-observation' : 'not-exposed-by-lmapi',
+                    min_thinking_budget: model.minThinkingBudget !== undefined ? 'lmapi-runtime-observation' : 'not-exposed-by-lmapi',
+                    max_thinking_budget: model.maxThinkingBudget !== undefined ? 'lmapi-runtime-observation' : 'not-exposed-by-lmapi'
+                },
+                notes: [
+                    'Model metadata is derived from live VS Code LM API objects and runtime observations only.',
+                    'Tool and vision flags are advisory hints only; the bridge still attempts requests and lets the runtime/provider decide.',
+                    'Stable selectChatModels exposes id/vendor/family/version/maxInputTokens. Capabilities/thinking parts currently live behind newer or proposed VS Code LM API surfaces.',
+                    'There is no stable LM API field in this build for model-specific reasoning effort or thinking budget controls; use request-side x_lmapi.model_options only as provider-specific passthrough.',
+                    'Current bridge transport does not send native image parts, so image_url inputs are forwarded as descriptive text context unless a future runtime surface is wired in.'
+                ]
+            }
         }));
         
         return {
@@ -1215,6 +1284,9 @@ export class Converter {
      * @returns 健康检查响应对象
      */
     public static createHealthResponse(serverState: ServerState, modelPool?: ModelPool) {
+        const activeModels = modelPool
+            ? [...modelPool.primary, ...modelPool.secondary, ...modelPool.fallback]
+            : [];
         return {
             status: 'ok',
             timestamp: new Date().toISOString(),
@@ -1226,13 +1298,13 @@ export class Converter {
                 activeConnections: serverState.activeConnections
             },
             models: modelPool ? {
-                total: modelPool.primary.length + modelPool.secondary.length + modelPool.fallback.length,
+                total: activeModels.length,
                 primary: modelPool.primary.length,
                 secondary: modelPool.secondary.length,
                 fallback: modelPool.fallback.length,
                 unhealthy: modelPool.unhealthy.length,
-                supportsVision: modelPool.primary.filter(m => m.supportsVision).length,
-                supportsTools: modelPool.primary.filter(m => m.supportsTools).length
+                supportsVision: activeModels.filter(m => m.supportsVision).length,
+                supportsTools: activeModels.filter(m => m.supportsTools).length
             } : undefined
         };
     }
