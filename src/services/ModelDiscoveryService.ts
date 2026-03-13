@@ -215,6 +215,7 @@ export class ModelDiscoveryService {
             // 从 VS Code LM API 获取所有模型
             const allModels = await vscode.lm.selectChatModels();
             logger.info(`Found ${allModels.length} total models`);
+            this.logRawModelDiscoverySnapshot(allModels);
             
             const discoveredModels: ModelCapabilities[] = [];
             const nextModelCache = new Map<string, ModelCapabilities>();
@@ -257,6 +258,39 @@ export class ModelDiscoveryService {
             throw new Error(`Model discovery failed: ${error}`);
         }
     }
+
+    /**
+     * 输出 `selectChatModels()` 的原始快照和重复 id 分组，便于排查来源差异。
+     */
+    private logRawModelDiscoverySnapshot(models: readonly vscode.LanguageModelChat[]): void {
+        const snapshot = models.map(model => ({
+            id: model.id,
+            family: model.family,
+            vendor: model.vendor,
+            version: model.version,
+            maxInputTokens: model.maxInputTokens
+        }));
+
+        logger.debug('VS Code LM raw model snapshot:', { models: snapshot });
+
+        const duplicateIds = Array.from(
+            snapshot.reduce((groups, model) => {
+                const group = groups.get(model.id) ?? [];
+                group.push(model);
+                groups.set(model.id, group);
+                return groups;
+            }, new Map<string, typeof snapshot>())
+        )
+            .filter(([, group]) => group.length > 1)
+            .map(([id, group]) => ({
+                id,
+                entries: group
+            }));
+
+        if (duplicateIds.length > 0) {
+            logger.debug('VS Code LM duplicate model ids detected:', { duplicateIds });
+        }
+    }
     
     /**
      * 分析单个模型的能力特征
@@ -288,9 +322,12 @@ export class ModelDiscoveryService {
             lastTestedAt: new Date()
         };
         
+        let visionCapabilityProbe: { probeText: string; matchedHints: string[]; supported: boolean } | undefined;
+
         // 测试视觉能力
         try {
-            capabilities.supportsVision = await this.testVisionCapability(vsCodeModel);
+            visionCapabilityProbe = this.evaluateVisionCapability(vsCodeModel);
+            capabilities.supportsVision = visionCapabilityProbe.supported;
             if (capabilities.supportsVision) {
                 capabilities.supportsMultimodal = true;
                 capabilities.supportedImageFormats = ['jpeg', 'jpg', 'png', 'gif', 'webp'];
@@ -300,12 +337,12 @@ export class ModelDiscoveryService {
             logger.debug(`Vision test failed for ${vsCodeModel.id}:`, { error: String(error) });
         }
         
-        let toolCapabilityProbe: { probeText: string; matchedHints: string[] } | undefined;
+        let toolCapabilityProbe: { probeText: string; matchedHints: string[]; supported: boolean } | undefined;
 
         // 测试工具/函数调用能力
         try {
             toolCapabilityProbe = this.evaluateToolCapability(vsCodeModel);
-            capabilities.supportsTools = toolCapabilityProbe.matchedHints.length > 0;
+            capabilities.supportsTools = toolCapabilityProbe.supported;
         } catch (error) {
             logger.debug(`Tool test failed for ${vsCodeModel.id}:`, { error: String(error) });
         }
@@ -316,6 +353,12 @@ export class ModelDiscoveryService {
 
         // 智能能力推理
         this.inferAdvancedCapabilities(capabilities);
+
+        logger.debug(`Vision capability probe for ${vsCodeModel.id}:`, {
+            probeText: visionCapabilityProbe?.probeText ?? this.getCapabilityProbeText(vsCodeModel),
+            matchedHints: visionCapabilityProbe?.matchedHints ?? [],
+            supportsVision: capabilities.supportsVision
+        });
 
         logger.debug(`Tool capability probe for ${vsCodeModel.id}:`, {
             probeText: toolCapabilityProbe?.probeText ?? this.getCapabilityProbeText(vsCodeModel),
@@ -338,21 +381,62 @@ export class ModelDiscoveryService {
      */
     private async testVisionCapability(model: vscode.LanguageModelChat): Promise<boolean> {
         try {
-            const probeText = this.getCapabilityProbeText(model);
-            const visionHints = [
-                'vision',
-                'multimodal',
-                'gpt-4o',
-                'gpt-4.1',
-                'gpt-4-turbo',
-                'claude-3',
-                'claude-sonnet-4',
-                'gemini'
-            ];
-            return visionHints.some(hint => probeText.includes(hint));
+            return this.evaluateVisionCapability(model).supported;
         } catch (error) {
             return false;
         }
+    }
+
+    /**
+     * 返回视觉能力启发式探测的输入文本与命中项，优先使用已确认的官方模型模式修正误判。
+     */
+    private evaluateVisionCapability(
+        model: vscode.LanguageModelChat
+    ): { probeText: string; matchedHints: string[]; supported: boolean } {
+        const probeText = this.getCapabilityProbeText(model);
+        const identities = this.getCapabilityProbeCandidates(model);
+        const exactFalse = new Set([
+            'gpt-3.5-turbo',
+            'gpt-3.5-turbo-0613',
+            'gpt-4',
+            'gpt-4-0613',
+            'gpt-4-o-preview',
+            'gpt-4o-mini',
+            'gpt-4o-mini-2024-07-18',
+            'gpt-4o-2024-08-06',
+            'gpt-41-copilot',
+            'grok-code-fast-1',
+            'text-embedding-3-small',
+            'text-embedding-3-small-inference',
+            'text-embedding-ada-002'
+        ]);
+        const prefixTrue = [
+            'claude-',
+            'gemini-',
+            'gpt-5',
+            'gpt-4.1',
+            'gpt-4o'
+        ];
+
+        for (const identity of identities) {
+            if (exactFalse.has(identity)) {
+                return {
+                    probeText,
+                    matchedHints: [`exact:false:${identity}`],
+                    supported: false
+                };
+            }
+        }
+
+        const matchedHints = prefixTrue
+            .filter(prefix => identities.some(identity => identity.startsWith(prefix)))
+            .map(prefix => `prefix:true:${prefix}`);
+
+        return {
+            probeText,
+            matchedHints,
+            supported: matchedHints.length > 0
+        };
     }
 
     /**
@@ -378,8 +462,26 @@ export class ModelDiscoveryService {
      */
     private evaluateToolCapability(
         model: vscode.LanguageModelChat
-    ): { probeText: string; matchedHints: string[] } {
+    ): { probeText: string; matchedHints: string[]; supported: boolean } {
         const probeText = this.getCapabilityProbeText(model);
+        const identities = this.getCapabilityProbeCandidates(model);
+        const exactFalse = new Set([
+            'gpt-41-copilot',
+            'text-embedding-3-small',
+            'text-embedding-3-small-inference',
+            'text-embedding-ada-002'
+        ]);
+
+        for (const identity of identities) {
+            if (exactFalse.has(identity)) {
+                return {
+                    probeText,
+                    matchedHints: [`exact:false:${identity}`],
+                    supported: false
+                };
+            }
+        }
+
         const toolHints = [
             'gpt-3.5',
             'gpt-4',
@@ -389,6 +491,7 @@ export class ModelDiscoveryService {
             /\bo4\b/,
             'claude',
             'gemini',
+            'grok',
             'tool',
             'function'
         ];
@@ -399,8 +502,22 @@ export class ModelDiscoveryService {
 
         return {
             probeText,
-            matchedHints
+            matchedHints,
+            supported: matchedHints.length > 0
         };
+    }
+
+    /**
+     * 提取用于能力探测的候选标识，按 id/family/vendor 去重。
+     */
+    private getCapabilityProbeCandidates(model: vscode.LanguageModelChat): string[] {
+        return Array.from(
+            new Set(
+                [model.id, model.family, model.vendor]
+                    .filter((value): value is string => Boolean(value))
+                    .map(value => value.toLowerCase())
+            )
+        );
     }
 
     /**

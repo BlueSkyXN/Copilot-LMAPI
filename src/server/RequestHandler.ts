@@ -1192,17 +1192,44 @@ export class RequestHandler {
         requestLogger: RequestLogger,
         allowToolFallback: boolean
     ): Promise<vscode.LanguageModelChatResponse> {
+        const toolCount = Array.isArray(requestOptions.tools) ? requestOptions.tools.length : 0;
+
         try {
+            requestLogger.debug('LM request with tool settings:', {
+                model: model.id,
+                toolCount,
+                toolMode: requestOptions.toolMode ?? 'none',
+                allowToolFallback
+            });
+
             // 首次尝试：带工具配置发送请求
-            return await model.sendRequest(messages, requestOptions, token);
+            const response = await model.sendRequest(messages, requestOptions, token);
+            requestLogger.debug('LM request accepted by VS Code LM API:', {
+                model: model.id,
+                toolCount,
+                toolMode: requestOptions.toolMode ?? 'none'
+            });
+            return response;
         } catch (error) {
             // 检查是否满足降级条件
-            const hasTools = Array.isArray(requestOptions.tools) && requestOptions.tools.length > 0;
+            const hasTools = toolCount > 0;
+            const likelyToolError = this.isLikelyToolModeError(error);
+
+            requestLogger.info('LM tool failure analysis:', {
+                model: model.id,
+                toolCount,
+                toolMode: requestOptions.toolMode ?? 'none',
+                allowToolFallback,
+                tokenCancelled: token.isCancellationRequested,
+                likelyToolError,
+                error: this.stringifyError(error)
+            });
+
             if (
                 !allowToolFallback ||
                 !hasTools ||
                 token.isCancellationRequested ||
-                !this.isLikelyToolModeError(error)
+                !likelyToolError
             ) {
                 // 不满足降级条件，直接抛出原始错误
                 throw error;

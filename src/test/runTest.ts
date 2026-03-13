@@ -244,7 +244,7 @@ const checks: CheckCase[] = [
             );
             assert.ok(
                 content.includes('toolCapabilityProbe = this.evaluateToolCapability(vsCodeModel);') &&
-                content.includes('capabilities.supportsTools = toolCapabilityProbe.matchedHints.length > 0;'),
+                content.includes('capabilities.supportsTools = toolCapabilityProbe.supported;'),
                 'supportsTools should be derived from explicit heuristic probe details'
             );
             assert.ok(
@@ -259,11 +259,12 @@ const checks: CheckCase[] = [
         run: () => {
             const content = readRepoFile('src/services/ModelDiscoveryService.ts');
             assert.ok(
+                content.includes('logger.debug(`Vision capability probe for ${vsCodeModel.id}:`, {') &&
                 content.includes('logger.debug(`Tool capability probe for ${vsCodeModel.id}:`, {') &&
                 content.includes('probeText: toolCapabilityProbe?.probeText ?? this.getCapabilityProbeText(vsCodeModel)') &&
                 content.includes('matchedHints: toolCapabilityProbe?.matchedHints ?? []') &&
                 content.includes('private evaluateToolCapability('),
-                'Model discovery logs should include the tool probe text and matched hints'
+                'Model discovery logs should include the vision/tool probe text and matched hints'
             );
         }
     },
@@ -273,12 +274,19 @@ const checks: CheckCase[] = [
         run: () => {
             const content = readRepoFile('src/services/ModelDiscoveryService.ts');
             assert.ok(
-                content.includes('const visionHints = [') && content.includes('const toolHints = ['),
-                'Capability probes should use conservative hint-based detection'
+                content.includes('const prefixTrue = [') && content.includes('const toolHints = ['),
+                'Capability probes should use conservative prefix/hint-based detection'
             );
             assert.ok(
-                content.includes('getCapabilityProbeText('),
+                content.includes('getCapabilityProbeText(') &&
+                content.includes('private getCapabilityProbeCandidates('),
                 'Capability probes should normalize model metadata before matching'
+            );
+            assert.ok(
+                content.includes('gpt-4o-mini') &&
+                content.includes('grok') &&
+                content.includes('gpt-5'),
+                'Capability probes should include known official-model overrides and hints'
             );
         }
     },
@@ -294,6 +302,19 @@ const checks: CheckCase[] = [
             assert.ok(
                 content.includes('this.modelCache = nextModelCache;'),
                 'Discovery should replace cache atomically to avoid stale model entries'
+            );
+        }
+    },
+    {
+        /** 验证 ModelDiscoveryService 会记录 selectChatModels 原始快照和重复 id 分组 */
+        name: 'ModelDiscoveryService logs raw model snapshots and duplicates',
+        run: () => {
+            const content = readRepoFile('src/services/ModelDiscoveryService.ts');
+            assert.ok(
+                content.includes('this.logRawModelDiscoverySnapshot(allModels);') &&
+                content.includes("logger.debug('VS Code LM raw model snapshot:'") &&
+                content.includes("logger.debug('VS Code LM duplicate model ids detected:'"),
+                'Discovery should log raw model snapshots and duplicate ids for debugging'
             );
         }
     },
@@ -519,6 +540,19 @@ const checks: CheckCase[] = [
                 content.includes('Tool-enabled LM response processing failed before headers were sent, retrying once without tools') &&
                 content.includes('this.withoutToolsRequestOptions(requestOptions)'),
                 'RequestHandler should retry once without tools when response processing fails before headers are sent'
+            );
+        }
+    },
+    {
+        /** 验证 RequestHandler 会记录请求阶段的 tool 发送参数和失败分析 */
+        name: 'RequestHandler logs request-time tool routing decisions',
+        run: () => {
+            const content = readRepoFile('src/server/RequestHandler.ts');
+            assert.ok(
+                content.includes("requestLogger.debug('LM request with tool settings:'") &&
+                content.includes("requestLogger.info('LM tool failure analysis:'") &&
+                content.includes('model: model.id'),
+                'RequestHandler should log the chosen model and tool fallback analysis for debugging'
             );
         }
     },
