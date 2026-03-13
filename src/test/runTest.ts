@@ -243,12 +243,27 @@ const checks: CheckCase[] = [
                 'supportsTools should be initialized to false'
             );
             assert.ok(
-                content.includes('capabilities.supportsTools = await this.testToolCapability(vsCodeModel);'),
-                'supportsTools should be set from testToolCapability'
+                content.includes('toolCapabilityProbe = this.evaluateToolCapability(vsCodeModel);') &&
+                content.includes('capabilities.supportsTools = toolCapabilityProbe.matchedHints.length > 0;'),
+                'supportsTools should be derived from explicit heuristic probe details'
             );
             assert.ok(
                 !content.includes('supportsFunctionCalling'),
                 'ModelDiscoveryService should not reference supportsFunctionCalling'
+            );
+        }
+    },
+    {
+        /** 验证 ModelDiscoveryService 会记录工具探测依据，便于排查误判 */
+        name: 'ModelDiscoveryService logs tool capability probe details',
+        run: () => {
+            const content = readRepoFile('src/services/ModelDiscoveryService.ts');
+            assert.ok(
+                content.includes('logger.debug(`Tool capability probe for ${vsCodeModel.id}:`, {') &&
+                content.includes('probeText: toolCapabilityProbe?.probeText ?? this.getCapabilityProbeText(vsCodeModel)') &&
+                content.includes('matchedHints: toolCapabilityProbe?.matchedHints ?? []') &&
+                content.includes('private evaluateToolCapability('),
+                'Model discovery logs should include the tool probe text and matched hints'
             );
         }
     },
@@ -491,6 +506,32 @@ const checks: CheckCase[] = [
                 content.includes('? RequestHandler.COPILOT_ACCESS_SUCCESS_CACHE_TTL') &&
                 content.includes(': RequestHandler.COPILOT_ACCESS_FAILURE_CACHE_TTL'),
                 'Copilot access cache should use success TTL only for available=true and short TTL otherwise'
+            );
+        }
+    },
+    {
+        /** 验证 RequestHandler 会在流/聚合阶段的预头部失败时，去工具重试一次 */
+        name: 'RequestHandler retries pre-header tool failures without tools',
+        run: () => {
+            const content = readRepoFile('src/server/RequestHandler.ts');
+            assert.ok(
+                content.includes('Tool-enabled LM stream failed before headers were sent, retrying once without tools') &&
+                content.includes('Tool-enabled LM response processing failed before headers were sent, retrying once without tools') &&
+                content.includes('this.withoutToolsRequestOptions(requestOptions)'),
+                'RequestHandler should retry once without tools when response processing fails before headers are sent'
+            );
+        }
+    },
+    {
+        /** 验证 RequestHandler 的流处理在响应头未发送前会向上抛错，并提供降级目录消息 */
+        name: 'RequestHandler preserves pre-header stream fallback path',
+        run: () => {
+            const content = readRepoFile('src/server/RequestHandler.ts');
+            assert.ok(
+                content.includes('throw error;') &&
+                content.includes('if (res.headersSent && !res.writableEnded)') &&
+                content.includes('Fallback tool catalog for this request.'),
+                'Streaming handler should rethrow pre-header errors and fallback path should include a tool catalog'
             );
         }
     },

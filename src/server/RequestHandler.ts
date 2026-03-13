@@ -204,7 +204,7 @@ import {
     EnhancedMessage,
     EnhancedRequestContext
 } from '../types/ModelCapabilities';
-import { OpenAITool, ValidatedRequest } from '../types/OpenAI';
+import { OpenAIFunction, OpenAITool, ValidatedRequest } from '../types/OpenAI';
 
 import { ServerState } from '../types/VSCode';
 import {
@@ -537,6 +537,9 @@ export class RequestHandler {
                 if (toolMode && vsCodeTools.length > 0) {
                     requestOptions.toolMode = toolMode;
                 }
+                const toolFallbackMessages = this.createToolFallbackMessages(vsCodeMessages, functions, tools);
+                const allowToolFallback = vsCodeTools.length > 0 && !requiresToolCall;
+
                 // 创建请求级别的 CancellationTokenSource，用于链接多个取消来源
                 const requestCancellation = new vscode.CancellationTokenSource();
                 let serverCancellationSubscription: vscode.Disposable | undefined;
@@ -581,29 +584,90 @@ export class RequestHandler {
                         requestOptions,
                         requestCancellation.token,
                         requestLogger,
-                        vsCodeTools.length > 0 && !requiresToolCall
+                        allowToolFallback
                     );
                     
                     // 根据客户端请求的 stream 参数选择流式或非流式响应处理
                     if (isStream) {
-                        await this.handleStreamingResponse(
-                            response,
-                            res,
-                            context,
-                            requestLogger,
-                            requiresToolCall,
-                            requiredModeParam
-                        );
+                        try {
+                            await this.handleStreamingResponse(
+                                response,
+                                res,
+                                context,
+                                requestLogger,
+                                requiresToolCall,
+                                requiredModeParam
+                            );
+                        } catch (responseError) {
+                            if (
+                                !allowToolFallback ||
+                                res.headersSent ||
+                                requestCancellation.token.isCancellationRequested
+                            ) {
+                                throw responseError;
+                            }
+
+                            requestLogger.warn(
+                                'Tool-enabled LM stream failed before headers were sent, retrying once without tools',
+                                { error: this.stringifyError(responseError) }
+                            );
+
+                            const fallbackResponse = await selectedModel.vsCodeModel.sendRequest(
+                                toolFallbackMessages,
+                                this.withoutToolsRequestOptions(requestOptions),
+                                requestCancellation.token
+                            );
+
+                            await this.handleStreamingResponse(
+                                fallbackResponse,
+                                res,
+                                context,
+                                requestLogger,
+                                requiresToolCall,
+                                requiredModeParam
+                            );
+                        }
                     } else {
-                        await this.handleNonStreamingResponse(
-                            response,
-                            res,
-                            context,
-                            requestLogger,
-                            preferLegacyFunctionCall,
-                            requiresToolCall,
-                            requiredModeParam
-                        );
+                        try {
+                            await this.handleNonStreamingResponse(
+                                response,
+                                res,
+                                context,
+                                requestLogger,
+                                preferLegacyFunctionCall,
+                                requiresToolCall,
+                                requiredModeParam
+                            );
+                        } catch (responseError) {
+                            if (
+                                !allowToolFallback ||
+                                res.headersSent ||
+                                requestCancellation.token.isCancellationRequested
+                            ) {
+                                throw responseError;
+                            }
+
+                            requestLogger.warn(
+                                'Tool-enabled LM response processing failed before headers were sent, retrying once without tools',
+                                { error: this.stringifyError(responseError) }
+                            );
+
+                            const fallbackResponse = await selectedModel.vsCodeModel.sendRequest(
+                                toolFallbackMessages,
+                                this.withoutToolsRequestOptions(requestOptions),
+                                requestCancellation.token
+                            );
+
+                            await this.handleNonStreamingResponse(
+                                fallbackResponse,
+                                res,
+                                context,
+                                requestLogger,
+                                preferLegacyFunctionCall,
+                                requiresToolCall,
+                                requiredModeParam
+                            );
+                        }
                     }
                 } finally {
                     // 清理事件监听器和取消令牌，防止资源泄漏
@@ -636,7 +700,7 @@ export class RequestHandler {
                     this.sendErrorResponse(
                         res,
                         HTTP_STATUS.BAD_GATEWAY,
-                        `Language model request failed: ${lmError}`,
+                        `Language model request failed: ${this.stringifyError(lmError)}`,
                         ERROR_CODES.API_ERROR,
                         requestId
                     );
@@ -904,14 +968,7 @@ export class RequestHandler {
             }
 
             if (!res.headersSent) {
-                this.sendErrorResponse(
-                    res,
-                    HTTP_STATUS.BAD_GATEWAY,
-                    'Stream processing error',
-                    ERROR_CODES.API_ERROR,
-                    context.requestId
-                );
-                return;
+                throw error;
             }
             
             const errorEvent = Converter.createSSEEvent('error', {
@@ -921,7 +978,7 @@ export class RequestHandler {
             res.write(errorEvent);
         } finally {
             // 确保响应流正确关闭，防止连接挂起
-            if (!res.writableEnded) {
+            if (res.headersSent && !res.writableEnded) {
                 res.end();
             }
         }
@@ -1024,6 +1081,90 @@ export class RequestHandler {
     }
 
     /**
+     * 为“去工具降级重试”构造额外提示，避免能力询问在 fallback 路径完全失真。
+     */
+    private createToolFallbackMessages(
+        messages: vscode.LanguageModelChatMessage[],
+        functions: OpenAIFunction[],
+        tools: OpenAITool[]
+    ): vscode.LanguageModelChatMessage[] {
+        const toolCatalog = this.buildToolCatalogFallbackMessage(functions, tools);
+        if (!toolCatalog) {
+            return messages;
+        }
+
+        return [
+            ...messages,
+            vscode.LanguageModelChatMessage.User(toolCatalog)
+        ];
+    }
+
+    /**
+     * 将请求中的工具定义压缩成一段只读目录，供不带 tools 的降级重试参考。
+     */
+    private buildToolCatalogFallbackMessage(
+        functions: OpenAIFunction[],
+        tools: OpenAITool[]
+    ): string | undefined {
+        const lines: string[] = [];
+        const seen = new Set<string>();
+        const maxEntries = 20;
+        let totalEntries = 0;
+
+        const appendFunction = (fn?: OpenAIFunction) => {
+            const name = fn?.name?.trim();
+            if (!name) {
+                return;
+            }
+
+            totalEntries++;
+            if (seen.has(name) || lines.length >= maxEntries) {
+                return;
+            }
+
+            seen.add(name);
+            const description = fn?.description?.trim()?.replace(/\s+/g, ' ');
+            const compactDescription = description ? description.slice(0, 180) : '';
+            lines.push(compactDescription ? `- ${name}: ${compactDescription}` : `- ${name}`);
+        };
+
+        for (const fn of functions) {
+            appendFunction(fn);
+        }
+        for (const tool of tools) {
+            appendFunction(tool.function);
+        }
+
+        if (lines.length === 0) {
+            return undefined;
+        }
+
+        if (totalEntries > lines.length) {
+            lines.push(`- ... and ${totalEntries - lines.length} more tools omitted for brevity`);
+        }
+
+        return [
+            'Fallback tool catalog for this request.',
+            'If native tool-calling is unavailable, answer capability or availability questions from this catalog only.',
+            'Do not claim that any tool was executed in this fallback path.',
+            ...lines
+        ].join('\n');
+    }
+
+    /**
+     * 去掉工具相关配置，复用在“首发失败”和“流启动前失败”两类降级路径。
+     */
+    private withoutToolsRequestOptions(
+        requestOptions: vscode.LanguageModelChatRequestOptions
+    ): vscode.LanguageModelChatRequestOptions {
+        return {
+            ...requestOptions,
+            tools: undefined,
+            toolMode: undefined
+        };
+    }
+
+    /**
      * 发送 LM 请求，支持工具模式出错时的自动降级重试
      *
      * 当满足以下条件时，会自动去除工具配置重试一次：
@@ -1072,11 +1213,7 @@ export class RequestHandler {
             });
 
             // 降级重试：移除工具和工具模式配置，仅保留其他选项
-            const fallbackOptions: vscode.LanguageModelChatRequestOptions = {
-                ...requestOptions,
-                tools: undefined,
-                toolMode: undefined
-            };
+            const fallbackOptions = this.withoutToolsRequestOptions(requestOptions);
 
             try {
                 return await model.sendRequest(messages, fallbackOptions, token);

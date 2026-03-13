@@ -300,9 +300,12 @@ export class ModelDiscoveryService {
             logger.debug(`Vision test failed for ${vsCodeModel.id}:`, { error: String(error) });
         }
         
+        let toolCapabilityProbe: { probeText: string; matchedHints: string[] } | undefined;
+
         // 测试工具/函数调用能力
         try {
-            capabilities.supportsTools = await this.testToolCapability(vsCodeModel);
+            toolCapabilityProbe = this.evaluateToolCapability(vsCodeModel);
+            capabilities.supportsTools = toolCapabilityProbe.matchedHints.length > 0;
         } catch (error) {
             logger.debug(`Tool test failed for ${vsCodeModel.id}:`, { error: String(error) });
         }
@@ -313,6 +316,12 @@ export class ModelDiscoveryService {
 
         // 智能能力推理
         this.inferAdvancedCapabilities(capabilities);
+
+        logger.debug(`Tool capability probe for ${vsCodeModel.id}:`, {
+            probeText: toolCapabilityProbe?.probeText ?? this.getCapabilityProbeText(vsCodeModel),
+            matchedHints: toolCapabilityProbe?.matchedHints ?? [],
+            supportsTools: capabilities.supportsTools
+        });
         
         return capabilities;
     }
@@ -358,25 +367,40 @@ export class ModelDiscoveryService {
      */
     private async testToolCapability(model: vscode.LanguageModelChat): Promise<boolean> {
         try {
-            const probeText = this.getCapabilityProbeText(model);
-            const toolHints = [
-                'gpt-3.5',
-                'gpt-4',
-                'gpt-5',
-                /\bo1\b/,
-                /\bo3\b/,
-                /\bo4\b/,
-                'claude',
-                'gemini',
-                'tool',
-                'function'
-            ];
-            return toolHints.some(hint =>
-                typeof hint === 'string' ? probeText.includes(hint) : hint.test(probeText)
-            );
+            return this.evaluateToolCapability(model).matchedHints.length > 0;
         } catch (error) {
             return false;
         }
+    }
+
+    /**
+     * 返回工具能力启发式探测的输入文本与命中项，便于定位误判原因。
+     */
+    private evaluateToolCapability(
+        model: vscode.LanguageModelChat
+    ): { probeText: string; matchedHints: string[] } {
+        const probeText = this.getCapabilityProbeText(model);
+        const toolHints = [
+            'gpt-3.5',
+            'gpt-4',
+            'gpt-5',
+            /\bo1\b/,
+            /\bo3\b/,
+            /\bo4\b/,
+            'claude',
+            'gemini',
+            'tool',
+            'function'
+        ];
+
+        const matchedHints = toolHints
+            .filter(hint => (typeof hint === 'string' ? probeText.includes(hint) : hint.test(probeText)))
+            .map(hint => hint.toString());
+
+        return {
+            probeText,
+            matchedHints
+        };
     }
 
     /**
