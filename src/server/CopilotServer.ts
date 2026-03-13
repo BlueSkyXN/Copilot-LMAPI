@@ -11,12 +11,14 @@ import { URL } from 'url';
 import { logger } from '../utils/Logger';
 import { Validator } from '../utils/Validator';
 import { RequestHandler } from './RequestHandler';
+import { generateConsoleHTML, getEndpointList } from './WebConsole';
 import { ModelDiscoveryService } from '../services/ModelDiscoveryService';
 import { ServerConfig, ServerState } from '../types/VSCode';
 import { 
     DEFAULT_CONFIG, 
     API_ENDPOINTS, 
     HTTP_STATUS, 
+    CONTENT_TYPES,
     CORS_HEADERS,
     NOTIFICATIONS,
     LIMITS
@@ -221,6 +223,14 @@ export class CopilotServer {
         requestId: string
     ): Promise<void> {
         switch (pathname) {
+            case API_ENDPOINTS.CONSOLE:
+                if (method === 'GET') {
+                    this.handleConsole(res);
+                } else {
+                    this.sendError(res, HTTP_STATUS.METHOD_NOT_ALLOWED, 'Method not allowed', requestId);
+                }
+                break;
+                
             case API_ENDPOINTS.CHAT_COMPLETIONS:
                 if (method === 'POST') {
                     await this.requestHandler.handleChatCompletions(req, res, requestId);
@@ -347,6 +357,20 @@ export class CopilotServer {
         } catch (error) {
             this.sendError(res, HTTP_STATUS.INTERNAL_SERVER_ERROR, 'Capabilities check failed', requestId);
         }
+    }
+    
+    /**
+     * 🖥️ 处理控制台主页
+     */
+    private handleConsole(res: http.ServerResponse): void {
+        const html = generateConsoleHTML({
+            serverState: this.state,
+            version: '0.3.3',
+            endpoints: getEndpointList()
+        });
+
+        res.writeHead(HTTP_STATUS.OK, { 'Content-Type': CONTENT_TYPES.HTML });
+        res.end(html);
     }
     
     /**

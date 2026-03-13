@@ -50,6 +50,7 @@ export const CONTENT_TYPES = {
     JSON: 'application/json',
     SSE: 'text/event-stream',
     TEXT: 'text/plain',
+    HTML: 'text/html',
 } as const;
 
 export const CORS_HEADERS = {
@@ -68,6 +69,7 @@ export const SSE_HEADERS = {
 } as const;
 
 export const API_ENDPOINTS = {
+    CONSOLE: '/',
     CHAT_COMPLETIONS: '/v1/chat/completions',
     MODELS: '/v1/models',
     HEALTH: '/health',
