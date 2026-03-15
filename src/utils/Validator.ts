@@ -271,6 +271,9 @@ export class Validator {
         if (validatedXLMAPI !== undefined) {
             validatedRequest.x_lmapi = validatedXLMAPI;
         }
+        if (request.stream_options !== undefined && request.stream_options !== null) {
+            validatedRequest.stream_options = this.validateStreamOptions(request.stream_options);
+        }
         
         return validatedRequest;
     }
@@ -300,6 +303,35 @@ export class Validator {
                 );
             }
             validated.model_options = raw.model_options as Record<string, unknown>;
+        }
+
+        return validated;
+    }
+
+    /**
+     * 验证流式选项 `stream_options`
+     *
+     * 当前仅支持 `include_usage` 布尔字段，控制流式响应最终 chunk 是否携带 token 用量。
+     */
+    private static validateStreamOptions(
+        options: unknown
+    ): NonNullable<OpenAICompletionRequest['stream_options']> {
+        if (!options || typeof options !== 'object' || Array.isArray(options)) {
+            throw new ValidationError('stream_options must be an object', ERROR_CODES.INVALID_REQUEST, 'stream_options');
+        }
+
+        const raw = options as Record<string, unknown>;
+        const validated: NonNullable<OpenAICompletionRequest['stream_options']> = {};
+
+        if (raw.include_usage !== undefined) {
+            if (typeof raw.include_usage !== 'boolean') {
+                throw new ValidationError(
+                    'stream_options.include_usage must be a boolean',
+                    ERROR_CODES.INVALID_REQUEST,
+                    'stream_options.include_usage'
+                );
+            }
+            validated.include_usage = raw.include_usage;
         }
 
         return validated;

@@ -279,6 +279,11 @@ export interface OpenAICompletionRequest {
     tools?: OpenAITool[];
     /** 工具调用控制（现代格式） */
     tool_choice?: OpenAIToolChoice;
+    /** 流式响应选项（仅 stream=true 时生效） */
+    stream_options?: {
+        /** 为 true 时，在流式响应最后一个 chunk 中附带完整 token 用量统计 */
+        include_usage?: boolean;
+    } | null;
     /** 非标准扩展：桥接层私有控制项 */
     x_lmapi?: {
         /**
@@ -412,6 +417,8 @@ export interface OpenAIStreamResponse {
     choices: OpenAIStreamChoice[];
     /** 系统指纹（可选） */
     system_fingerprint?: string;
+    /** 令牌用量统计（仅在 stream_options.include_usage=true 时出现于最终 chunk） */
+    usage?: OpenAIUsage | null;
 }
 
 /**

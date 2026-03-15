@@ -197,6 +197,7 @@ import {
     DEFAULT_CONFIG,
     API_ENDPOINTS,
     HTTP_STATUS,
+    ERROR_CODES,
     getCORSHeaders,
     NOTIFICATIONS,
     LIMITS,
@@ -896,25 +897,65 @@ export class CopilotServer {
      * @param statusCode - HTTP 状态码（如 400、401、429、500 等）
      * @param message - 人类可读的错误描述信息
      * @param requestId - 可选的请求标识符，包含在错误响应体中便于客户端调试
+     * @param errorType - 可选的 OpenAI 错误类型，不提供时根据 HTTP 状态码自动推断
      */
-    private sendError(res: http.ServerResponse, statusCode: number, message: string, requestId?: string): void {
+    private sendError(
+        res: http.ServerResponse,
+        statusCode: number,
+        message: string,
+        requestId?: string,
+        errorType?: string
+    ): void {
         if (res.headersSent) {
             return;
         }
+
+        // 未显式指定 errorType 时，根据 HTTP 状态码映射 OpenAI 标准错误类型
+        const type = errorType ?? this.mapStatusToErrorType(statusCode);
 
         res.writeHead(statusCode, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             error: {
                 message,
-                type: 'server_error',
-                code: statusCode,
-                timestamp: new Date().toISOString(),
-                requestId
+                type,
+                param: null,
+                code: null
             }
-        }, null, 2));
+        }));
 
         if (requestId) {
             logger.error(`Error response: ${statusCode}`, new Error(message), {}, requestId);
+        }
+    }
+
+    /**
+     * 将 HTTP 状态码映射为 OpenAI 标准错误类型
+     *
+     * @param statusCode - HTTP 状态码
+     * @returns OpenAI 错误类型字符串
+     */
+    private mapStatusToErrorType(statusCode: number): string {
+        switch (statusCode) {
+            case HTTP_STATUS.BAD_REQUEST:
+                return ERROR_CODES.INVALID_REQUEST;
+            case HTTP_STATUS.UNAUTHORIZED:
+                return ERROR_CODES.AUTHENTICATION_ERROR;
+            case HTTP_STATUS.FORBIDDEN:
+                return ERROR_CODES.PERMISSION_ERROR;
+            case HTTP_STATUS.NOT_FOUND:
+                return ERROR_CODES.NOT_FOUND_ERROR;
+            case HTTP_STATUS.METHOD_NOT_ALLOWED:
+                return ERROR_CODES.INVALID_REQUEST;
+            case HTTP_STATUS.REQUEST_TIMEOUT:
+                return ERROR_CODES.TIMEOUT_ERROR;
+            case HTTP_STATUS.PAYLOAD_TOO_LARGE:
+                return ERROR_CODES.INVALID_REQUEST;
+            case HTTP_STATUS.TOO_MANY_REQUESTS:
+                return ERROR_CODES.RATE_LIMIT_ERROR;
+            case HTTP_STATUS.SERVICE_UNAVAILABLE:
+                return ERROR_CODES.OVERLOADED_ERROR;
+            default:
+                return ERROR_CODES.API_ERROR;
         }
     }
 

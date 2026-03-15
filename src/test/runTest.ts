@@ -994,6 +994,94 @@ const checks: CheckCase[] = [
                 'OpenAI types must define reasoning_content and reasoning_tokens fields'
             );
         }
+    },
+    {
+        /**
+         * stream_options.include_usage 支持
+         *
+         * 验证类型定义包含 stream_options，Validator 校验流式选项，
+         * Converter 在启用时发送含 usage 的最终 chunk，RequestHandler 传递 includeUsage。
+         */
+        name: 'Streaming response supports stream_options.include_usage for token reporting',
+        run: () => {
+            // 类型定义
+            const typesSrc = readRepoFile('src/types/OpenAI.ts');
+            assert.ok(
+                typesSrc.includes('stream_options?') &&
+                typesSrc.includes('include_usage?: boolean'),
+                'OpenAI types must define stream_options with include_usage field'
+            );
+            assert.ok(
+                typesSrc.includes('usage?: OpenAIUsage | null'),
+                'OpenAIStreamResponse must have optional usage field'
+            );
+            // Validator 校验
+            const validatorSrc = readRepoFile('src/utils/Validator.ts');
+            assert.ok(
+                validatorSrc.includes('validateStreamOptions') &&
+                validatorSrc.includes('stream_options.include_usage must be a boolean'),
+                'Validator must validate stream_options.include_usage as boolean'
+            );
+            // Converter 流末尾 usage chunk
+            const converterSrc = readRepoFile('src/utils/Converter.ts');
+            assert.ok(
+                converterSrc.includes('includeUsage') &&
+                converterSrc.includes('choices: []') &&
+                converterSrc.includes('completionTextLength'),
+                'Converter must emit usage-only chunk with empty choices when includeUsage is true'
+            );
+            // RequestHandler 传递
+            const handlerSrc = readRepoFile('src/server/RequestHandler.ts');
+            assert.ok(
+                handlerSrc.includes('includeUsage') &&
+                handlerSrc.includes('stream_options?.include_usage'),
+                'RequestHandler must extract and pass includeUsage from stream_options'
+            );
+        }
+    },
+    {
+        /**
+         * OpenAI 兼容错误响应格式
+         *
+         * 验证 CopilotServer 和 Converter 均使用标准 { error: { message, type, param, code } } 格式，
+         * 不包含非标准字段（timestamp、requestId 作为顶级字段）。
+         */
+        name: 'Error responses use OpenAI-compatible format with proper type mapping',
+        run: () => {
+            const serverSrc = readRepoFile('src/server/CopilotServer.ts');
+            // CopilotServer 导入 ERROR_CODES
+            assert.ok(
+                serverSrc.includes('ERROR_CODES'),
+                'CopilotServer must import ERROR_CODES for proper error type mapping'
+            );
+            // mapStatusToErrorType 方法存在
+            assert.ok(
+                serverSrc.includes('mapStatusToErrorType') &&
+                serverSrc.includes('ERROR_CODES.INVALID_REQUEST') &&
+                serverSrc.includes('ERROR_CODES.AUTHENTICATION_ERROR') &&
+                serverSrc.includes('ERROR_CODES.RATE_LIMIT_ERROR'),
+                'CopilotServer must map HTTP status codes to OpenAI error types'
+            );
+            // sendError 使用标准格式: param: null, code: null
+            assert.ok(
+                serverSrc.includes('param: null') &&
+                serverSrc.includes('code: null'),
+                'CopilotServer sendError must use OpenAI format with null param and code'
+            );
+            // 不再使用非标准字段
+            assert.ok(
+                !serverSrc.includes("type: 'server_error'") &&
+                !serverSrc.includes('code: statusCode'),
+                'CopilotServer must not use legacy non-standard error fields'
+            );
+            // Converter.createErrorResponse 也输出 null 而非 undefined
+            const converterSrc = readRepoFile('src/utils/Converter.ts');
+            assert.ok(
+                converterSrc.includes('param: param ?? null') &&
+                converterSrc.includes('code: code ?? null'),
+                'Converter createErrorResponse must default absent fields to null per OpenAI spec'
+            );
+        }
     }
 ];
 

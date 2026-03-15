@@ -196,6 +196,8 @@ interface ToolConversionState {
 interface StreamExtractionOptions {
     /** 是否要求响应必须包含工具调用；为 true 时启用缓冲机制 */
     requiresToolCall?: boolean;
+    /** 是否在流末尾附带 token 用量统计（stream_options.include_usage） */
+    includeUsage?: boolean;
 }
 
 /**
@@ -928,21 +930,23 @@ export class Converter {
      * @param selectedModel - 所选模型的能力描述，用于生成 system_fingerprint
      * @param delta - 增量内容对象，可包含 role、content、tool_calls 等字段
      * @param finishReason - 完成原因（默认 null 表示生成未结束）
+     * @param usage - 可选的 token 用量统计（仅在 include_usage 最终 chunk 使用）
      * @returns OpenAI 格式的流式响应块对象
      */
     public static createStreamChunk(
         context: EnhancedRequestContext,
         selectedModel: ModelCapabilities,
         delta: OpenAIStreamResponse['choices'][0]['delta'],
-        finishReason: OpenAIStreamResponse['choices'][0]['finish_reason'] = null
+        finishReason: OpenAIStreamResponse['choices'][0]['finish_reason'] = null,
+        usage?: OpenAIUsage | null
     ): OpenAIStreamResponse {
         const now = Math.floor(Date.now() / 1000);
         
-        return {
+        const chunk: OpenAIStreamResponse = {
             id: `chatcmpl-${context.requestId}`,
             object: 'chat.completion.chunk',
             created: now,
-            model: context.model, // 使用请求的模型名称
+            model: context.model,
             choices: [{
                 index: 0,
                 delta,
@@ -950,6 +954,12 @@ export class Converter {
             }],
             system_fingerprint: `vs-code-${selectedModel.vendor}-${selectedModel.family}`
         };
+
+        if (usage !== undefined) {
+            chunk.usage = usage;
+        }
+
+        return chunk;
     }
     
     /**
@@ -1142,10 +1152,14 @@ export class Converter {
         options: StreamExtractionOptions = {}
     ): AsyncGenerator<string> {
         const requiresToolCall = !!options.requiresToolCall;
+        const includeUsage = !!options.includeUsage;
         let emittedRole = false;
         let hasToolCalls = false;
         let emittedToolCallIndex = 0;
         const pendingEvents: string[] = [];
+        // 流式 token 累加器（用于 include_usage）
+        let completionTextLength = 0;
+        let reasoningTextLength = 0;
         
         try {
             for await (const chunk of this.getResponseChunks(response)) {
@@ -1159,6 +1173,7 @@ export class Converter {
                 if (chunk instanceof vscode.LanguageModelTextPart) {
                     if (chunk.value) {
                         delta.content = chunk.value;
+                        completionTextLength += chunk.value.length;
                     }
                 } else if (chunk instanceof vscode.LanguageModelToolCallPart) {
                     const toolCall = this.convertVSCodeToolCallPart(chunk);
@@ -1172,14 +1187,17 @@ export class Converter {
                             arguments: toolCall.function.arguments
                         }
                     }];
+                    completionTextLength += (toolCall.function.name?.length || 0) + (toolCall.function.arguments?.length || 0);
                     emittedToolCallIndex++;
                 } else {
                     // ThinkingPart 运行时检测（不在 @types/vscode 中）
                     const thinkingText = this.getThinkingContent(chunk);
                     if (thinkingText) {
                         delta.reasoning_content = thinkingText;
+                        reasoningTextLength += thinkingText.length;
                     } else if (typeof chunk === 'string' && chunk) {
                         delta.content = chunk;
+                        completionTextLength += chunk.length;
                     }
                 }
 
@@ -1250,6 +1268,37 @@ export class Converter {
                 {},
                 finishReason
             ));
+
+            // stream_options.include_usage: 在 [DONE] 前发送含用量统计的额外 chunk
+            if (includeUsage) {
+                const completionTokens = this.estimateTokens(
+                    'x'.repeat(completionTextLength + reasoningTextLength)
+                );
+                const reasoningTokens = reasoningTextLength > 0
+                    ? this.estimateTokens('x'.repeat(reasoningTextLength))
+                    : 0;
+
+                const usage: OpenAIUsage = {
+                    prompt_tokens: context.estimatedTokens,
+                    completion_tokens: completionTokens,
+                    total_tokens: context.estimatedTokens + completionTokens
+                };
+                if (reasoningTokens > 0) {
+                    usage.completion_tokens_details = { reasoning_tokens: reasoningTokens };
+                }
+
+                const now = Math.floor(Date.now() / 1000);
+                const usageChunk: OpenAIStreamResponse = {
+                    id: `chatcmpl-${context.requestId}`,
+                    object: 'chat.completion.chunk',
+                    created: now,
+                    model: context.model,
+                    choices: [],
+                    system_fingerprint: `vs-code-${selectedModel.vendor}-${selectedModel.family}`,
+                    usage
+                };
+                yield this.createSSEEvent('data', usageChunk);
+            }
             
             // 发送完成信号
             yield this.createSSEEvent('done');
@@ -1560,15 +1609,15 @@ export class Converter {
     public static createErrorResponse(
         message: string,
         type: string = 'api_error',
-        code?: string,
-        param?: string
+        code?: string | null,
+        param?: string | null
     ) {
         return {
             error: {
                 message,
                 type,
-                code,
-                param
+                param: param ?? null,
+                code: code ?? null
             }
         };
     }

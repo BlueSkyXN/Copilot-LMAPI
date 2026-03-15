@@ -398,6 +398,8 @@ export class RequestHandler {
             const requiresToolCall = this.isRequiredToolMode(toolChoice, functionCall);
             // 记录触发强制模式的参数名称，用于错误响应中的 param 字段
             const requiredModeParam = toolChoice !== undefined ? 'tool_choice' : 'function_call';
+            // stream_options.include_usage: 流式响应末尾是否附带 token 用量
+            const includeUsage = !!(isStream && requestData.stream_options?.include_usage);
             
             requestLogger.info('Request analysis:', {
                 model: requestedModel,
@@ -623,7 +625,8 @@ export class RequestHandler {
                                 context,
                                 requestLogger,
                                 requiresToolCall,
-                                requiredModeParam
+                                requiredModeParam,
+                                includeUsage
                             );
                         } catch (responseError) {
                             if (
@@ -657,7 +660,8 @@ export class RequestHandler {
                                 context,
                                 requestLogger,
                                 requiresToolCall,
-                                requiredModeParam
+                                requiredModeParam,
+                                includeUsage
                             );
                         }
                     } else {
@@ -968,7 +972,8 @@ export class RequestHandler {
         context: EnhancedRequestContext,
         requestLogger: RequestLogger,
         requiresToolCall: boolean,
-        requiredModeParam: string
+        requiredModeParam: string,
+        includeUsage: boolean = false
     ): Promise<void> {
         try {
             requestLogger.info('Starting streaming response...');
@@ -981,7 +986,8 @@ export class RequestHandler {
                 context,
                 context.selectedModel!,
                 {
-                    requiresToolCall
+                    requiresToolCall,
+                    includeUsage
                 }
             )) {
                 // 延迟发送 SSE 头部：直到收到第一个数据块才写入响应头
@@ -1085,8 +1091,8 @@ export class RequestHandler {
                 return;
             }
 
-            // 使用官方 countTokens 精确计算 completion token 数
-            const completionText = `${fullResponse.content}${fullResponse.toolCalls
+            // 使用官方 countTokens 精确计算 completion token 数（包含推理内容）
+            const completionText = `${fullResponse.content}${fullResponse.reasoningContent || ''}${fullResponse.toolCalls
                 .map(call => `${call.function.name}${call.function.arguments}`)
                 .join('')}`;
             const preciseCompletionTokens = await Converter.countTokensOfficial(
