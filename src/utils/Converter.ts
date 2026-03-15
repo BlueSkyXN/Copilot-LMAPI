@@ -40,6 +40,8 @@
  *
  * 【StreamExtractionOptions（接口）】
  *   - 功能说明：流式提取选项
+ *   - 字段：requiresToolCall?: boolean — 是否要求响应包含工具调用
+ *   - 字段：includeUsage?: boolean — 是否在流末尾附带 token 用量统计
  *
  * 【Converter（类，静态方法集合）】
  *
@@ -108,24 +110,24 @@
  *  18. formatRolePrefix(role: string): string
  *      - 功能：格式化角色前缀
  *
- *  19. createCompletionResponse(content: string, model: string, requestId: string, usage: any, toolCalls?: ToolCall[], finishReason?: string): OpenAICompletionResponse
- *      - 功能：创建非流式响应
+ *  19. createCompletionResponse(content: string, context: EnhancedRequestContext, selectedModel: ModelCapabilities, toolCalls?: ToolCall[], preferLegacyFunctionCall?: boolean, preciseCompletionTokens?: number, reasoningContent?: string): OpenAICompletionResponse
+ *      - 功能：创建非流式响应（支持精确 token 计数和推理内容）
  *
- *  20. createStreamChunk(content: string, model: string, requestId: string, isFirst?: boolean, finishReason?: string, toolCallDelta?: any): OpenAIStreamResponse
- *      - 功能：创建流式响应块
+ *  20. createStreamChunk(context: EnhancedRequestContext, selectedModel: ModelCapabilities, delta: object, finishReason?: string | null, usage?: OpenAIUsage | null): OpenAIStreamResponse
+ *      - 功能：创建流式响应块（支持可选 usage 统计）
  *
  *  21. createModelsResponse(availableModels: any[]): OpenAIModelsResponse
  *      - 功能：创建模型列表响应
  *
- *  22. getResponseChunks(text: string, model: string, requestId: string): string[]
- *      - 功能：获取响应分块
+ *  22. getResponseChunks(response: vscode.LanguageModelChatResponse): AsyncIterable<vscode.LanguageModelTextPart | vscode.LanguageModelToolCallPart | string | unknown>
+ *      - 功能：获取响应分块（兼容新版 stream 和旧版 text 属性）
  *
- *  23. extractStreamContent(response: any, model: string, requestId: string, options?: StreamExtractionOptions): AsyncGenerator<string>
- *      - 功能：提取流式内容
+ *  23. extractStreamContent(response: vscode.LanguageModelChatResponse, context: EnhancedRequestContext, selectedModel: ModelCapabilities, options?: StreamExtractionOptions): AsyncGenerator<string>
+ *      - 功能：提取流式内容（支持 includeUsage 和 requiresToolCall 选项）
  *      - 输出：AsyncGenerator<string>
  *
- *  24. collectFullResponse(response: any): Promise<string>
- *      - 功能：收集完整响应
+ *  24. collectFullResponse(response: vscode.LanguageModelChatResponse): Promise<{ content: string; toolCalls: ToolCall[]; reasoningContent?: string }>
+ *      - 功能：收集完整响应（含推理内容）
  *
  *  25. createSSEEvent(type: string, data?: any): string
  *      - 功能：创建 SSE 事件
@@ -139,8 +141,8 @@
  *  28. createHealthResponse(serverState: ServerState, modelPool?: ModelPool): object
  *      - 功能：创建健康检查响应
  *
- *  29. createErrorResponse(message: string, type: string, param?: string, code?: string): OpenAIError
- *      - 功能：创建错误响应
+ *  29. createErrorResponse(message: string, type?: string, code?: string | null, param?: string | null): object
+ *      - 功能：创建错误响应（code 和 param 支持 null）
  *
  *  30. countTokensOfficial(model: vscode.LanguageModelChat, input: string | vscode.LanguageModelChatMessage | vscode.LanguageModelChatMessage[], token?: vscode.CancellationToken): Promise<number>
  *      - 功能：使用官方 countTokens API 精确计算 token 数，失败时降级到 estimateTokens

@@ -37,93 +37,127 @@
  *
  * 【Validator（类，静态方法集合）】
  *
- *   1. validateChatCompletionRequest(request: any, availableModels?: string[]): ValidatedRequest
+ *   1. validateChatCompletionRequest(request: any, availableModels?: ModelCapabilities[]): ValidatedRequest
  *      - 功能：验证聊天补全请求
- *      - 输入：request — 原始请求体, availableModels — 可用模型列表（可选）
+ *      - 输入：request — 原始请求体, availableModels — 可用模型能力列表（可选）
  *      - 输出：ValidatedRequest
  *
- *   2. validateEnhancedMessages(messages: any[]): EnhancedMessage[]
+ *   2. validateLMAPIExtension(extension: unknown): NonNullable<OpenAICompletionRequest['x_lmapi']>
+ *      - 功能：验证桥接层私有扩展字段 x_lmapi
+ *      - 输出：验证后的 x_lmapi 对象
+ *      - 访问级别：private static
+ *
+ *   3. validateStreamOptions(options: unknown): NonNullable<OpenAICompletionRequest['stream_options']>
+ *      - 功能：验证流式选项 stream_options（include_usage 等）
+ *      - 输出：验证后的 stream_options 对象
+ *      - 访问级别：private static
+ *
+ *   4. validateEnhancedMessages(messages: any): EnhancedMessage[]
  *      - 功能：验证消息数组
  *      - 输出：EnhancedMessage[]
+ *      - 访问级别：private static
  *
- *   3. validateEnhancedMessage(message: any, index: number): EnhancedMessage
+ *   5. validateEnhancedMessage(message: any, index: number): EnhancedMessage
  *      - 功能：验证单条消息
+ *      - 访问级别：private static
  *
- *   4. validateToolCallAssociations(messages: EnhancedMessage[]): void
+ *   6. validateToolCallAssociations(messages: EnhancedMessage[]): void
  *      - 功能：校验工具调用关联
+ *      - 访问级别：private static
  *
- *   5. validateMultimodalContent(content: any[], messageIndex: number): void
+ *   7. validateMultimodalContent(content: any[], messageIndex: number): void
  *      - 功能：验证多模态内容
+ *      - 访问级别：private static
  *
- *   6. validateImageUrl(url: string, messageIndex: number, partIndex: number): void
+ *   8. validateImageUrl(url: string, messageIndex: number, partIndex: number): void
  *      - 功能：验证图片 URL
+ *      - 访问级别：private static
  *
- *   7. validateDynamicModel(model: string, availableModels?: string[]): string
- *      - 功能：验证模型标识
+ *   9. validateDynamicModel(model: any, availableModels?: ModelCapabilities[]): string
+ *      - 功能：验证模型标识（动态，无硬编码列表）
  *      - 输出：验证通过的模型名称字符串
+ *      - 访问级别：private static
  *
- *   8. validateFunctions(functions: any[]): FunctionDefinition[]
+ *  10. validateFunctions(functions: any): FunctionDefinition[]
  *      - 功能：验证函数定义数组
  *      - 输出：FunctionDefinition[]
+ *      - 访问级别：private static
  *
- *   9. validateFunction(func: any, path: string): FunctionDefinition
+ *  11. validateFunction(func: any, path: string): FunctionDefinition
  *      - 功能：验证单个函数定义
+ *      - 访问级别：private static
  *
- *  10. validateTools(tools: any[]): OpenAITool[]
+ *  12. validateTools(tools: any): OpenAITool[]
  *      - 功能：验证工具定义数组
  *      - 输出：OpenAITool[]
+ *      - 访问级别：private static
  *
- *  11. validateToolCalls(toolCalls: any[], messageIndex: number): ToolCall[]
+ *  13. validateToolCalls(toolCalls: any, messageIndex: number): ToolCall[]
  *      - 功能：验证工具调用数组
  *      - 输出：ToolCall[]
+ *      - 访问级别：private static
  *
- *  12. validateMessageFunctionCall(functionCall: any, messageIndex: number): {name: string, arguments: string}
+ *  14. validateMessageFunctionCall(functionCall: any, messageIndex: number): { name: string; arguments: string }
  *      - 功能：验证消息中的函数调用
+ *      - 访问级别：private static
  *
- *  13. validateFunctionCallChoice(functionCall: any): OpenAIFunctionCallChoice | undefined
- *      - 功能：验证 function_call 选择
+ *  15. validateFunctionCallChoice(functionCall: any, availableToolNames: string[]): OpenAIFunctionCallChoice
+ *      - 功能：验证 function_call 选择（含工具名存在性检查）
+ *      - 访问级别：private static
  *
- *  14. validateToolChoice(toolChoice: any): OpenAIToolChoice | undefined
- *      - 功能：验证 tool_choice 选择
+ *  16. validateToolChoice(toolChoice: any, availableToolNames: string[]): OpenAIToolChoice
+ *      - 功能：验证 tool_choice 选择（含工具名存在性检查）
+ *      - 访问级别：private static
  *
- *  15. validateMaxTokens(maxTokens: any, selectedModel?: string): number | undefined
- *      - 功能：验证 max_tokens
+ *  17. validateMaxTokens(maxTokens: any, selectedModel?: ModelCapabilities): number | undefined
+ *      - 功能：验证 max_tokens（支持基于模型能力的动态上限校验）
+ *      - 访问级别：private static
  *
- *  16. validateStream(stream: any): boolean
+ *  18. validateStream(stream: any): boolean
  *      - 功能：验证 stream 参数
  *      - 输出：boolean
+ *      - 访问级别：private static
  *
- *  17. validateTemperature(temperature: any): number
+ *  19. validateTemperature(temperature: any): number
  *      - 功能：验证 temperature
  *      - 输出：number
+ *      - 访问级别：private static
  *
- *  18. validateN(n: any): number | undefined
+ *  20. validateN(n: any): number | undefined
  *      - 功能：验证 n 参数
+ *      - 访问级别：private static
  *
- *  19. validateTopP(topP: any): number | undefined
+ *  21. validateTopP(topP: any): number | undefined
  *      - 功能：验证 top_p
+ *      - 访问级别：private static
  *
- *  20. validateStop(stop: any): string | string[] | undefined
+ *  22. validateStop(stop: any): string | string[] | undefined
  *      - 功能：验证 stop 参数
+ *      - 访问级别：private static
  *
- *  21. validatePenalty(penalty: any, paramName: string): number | undefined
+ *  23. validatePenalty(penalty: any, paramName: string): number | undefined
  *      - 功能：验证惩罚系数
+ *      - 访问级别：private static
  *
- *  22. validateUser(user: any): string
+ *  24. validateUser(user: any): string
  *      - 功能：验证 user 字段
  *      - 输出：string
+ *      - 访问级别：private static
  *
- *  23. sanitizeString(input: string): string
+ *  25. sanitizeString(input: string): string
  *      - 功能：清理字符串（去控制字符）
  *      - 输出：string
+ *      - 访问级别：public static
  *
- *  24. validatePort(port: any): number
+ *  26. validatePort(port: any): number
  *      - 功能：验证端口号
  *      - 输出：number
+ *      - 访问级别：public static
  *
- *  25. validateHost(host: any): string
+ *  27. validateHost(host: any): string
  *      - 功能：验证主机地址
  *      - 输出：string
+ *      - 访问级别：public static
  */
 
 import { 

@@ -130,53 +130,59 @@
  *       - 输入: requestId — 请求 ID; res — HTTP 响应
  *       - 输出: void
  *
- *   13. sendError(res: http.ServerResponse, statusCode: number, message: string, requestId?: string): void
- *       - 功能: 发送 JSON 格式错误响应
+ *   13. sendError(res: http.ServerResponse, statusCode: number, message: string, requestId?: string, errorType?: string): void
+ *       - 功能: 发送 JSON 格式错误响应，errorType 不提供时根据状态码自动推断
  *       - 输入: res — HTTP 响应; statusCode — HTTP 状态码;
- *               message — 错误信息; requestId — 可选请求 ID
+ *               message — 错误信息; requestId — 可选请求 ID;
+ *               errorType — 可选 OpenAI 错误类型
  *       - 输出: void
  *
- *   14. generateRequestId(): string
+ *   14. mapStatusToErrorType(statusCode: number): string
+ *       - 功能: 将 HTTP 状态码映射为 OpenAI 标准错误类型字符串
+ *       - 输入: statusCode — HTTP 状态码
+ *       - 输出: string — 错误类型 (如 invalid_request_error, authentication_error 等)
+ *
+ *   15. generateRequestId(): string
  *       - 功能: 生成唯一请求 ID，格式为 req_<uuid>
  *       - 输入: 无
  *       - 输出: string — 唯一请求标识符
  *
- *   15. stop(): Promise<void>
+ *   16. stop(): Promise<void>
  *       - 功能: 优雅停止服务器，取消所有活动请求并关闭连接
  *       - 输入: 无
  *       - 输出: Promise<void>
  *
- *   16. restart(): Promise<void>
+ *   17. restart(): Promise<void>
  *       - 功能: 重启服务器（先停止再启动）
  *       - 输入: 无
  *       - 输出: Promise<void>
  *
- *   17. getState(): ServerState
+ *   18. getState(): ServerState
  *       - 功能: 获取运行时状态快照
  *       - 输入: 无
  *       - 输出: ServerState — 服务器当前状态
  *
- *   18. getConfig(): ServerConfig
+ *   19. getConfig(): ServerConfig
  *       - 功能: 获取当前配置快照
  *       - 输入: 无
  *       - 输出: ServerConfig — 当前配置对象
  *
- *   19. closeActiveRequests(): void
+ *   20. closeActiveRequests(): void
  *       - 功能: 取消所有活动请求，清空 activeRequests 映射表
  *       - 输入: 无
  *       - 输出: void
  *
- *   20. loadConfig(): ServerConfig
+ *   21. loadConfig(): ServerConfig
  *       - 功能: 从 VS Code 设置加载服务器配置
  *       - 输入: 无
  *       - 输出: ServerConfig — 加载后的配置对象
  *
- *   21. onConfigurationChanged(event: vscode.ConfigurationChangeEvent): void
+ *   22. onConfigurationChanged(event: vscode.ConfigurationChangeEvent): void
  *       - 功能: 配置变更监听与热重载，端口变更时自动重启
  *       - 输入: event — VS Code 配置变更事件
  *       - 输出: void
  *
- *   22. dispose(): void
+ *   23. dispose(): void
  *       - 功能: 释放所有资源（服务器、限流器、事件监听等）
  *       - 输入: 无
  *       - 输出: void

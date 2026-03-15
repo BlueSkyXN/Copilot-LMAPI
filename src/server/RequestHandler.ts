@@ -86,29 +86,34 @@
  *     - 输入参数: req, res, requestId — 同上
  *     - 输出/返回值: Promise<void>
  *
- *  7. handleStreamingResponse(res: http.ServerResponse,
- *       response: vscode.LanguageModelChatResponse, requestId: string,
- *       model: string, context: object, request: object): Promise<void>
- *     - 功能说明: SSE 流式响应处理（延迟头部发送，直到收到第一个数据块）
+ *  7. handleStreamingResponse(response: vscode.LanguageModelChatResponse,
+ *       res: http.ServerResponse, context: EnhancedRequestContext,
+ *       requestLogger: RequestLogger, requiresToolCall: boolean,
+ *       requiredModeParam: string, includeUsage?: boolean): Promise<void>
+ *     - 功能说明: SSE 流式响应处理（延迟头部发送，直到收到第一个数据块；支持 include_usage）
  *     - 输入参数:
- *         res: http.ServerResponse — HTTP 响应对象
  *         response: vscode.LanguageModelChatResponse — LM 响应流
- *         requestId: string — 请求唯一标识
- *         model: string — 模型标识符
- *         context: object — 工具调用上下文
- *         request: object — 原始请求对象
+ *         res: http.ServerResponse — HTTP 响应对象
+ *         context: EnhancedRequestContext — 增强请求上下文
+ *         requestLogger: RequestLogger — 请求级日志记录器
+ *         requiresToolCall: boolean — 是否为必需工具调用模式
+ *         requiredModeParam: string — 必需模式参数名（用于错误报告）
+ *         includeUsage?: boolean — 是否在流末尾附带 token 用量统计（默认 false）
  *     - 输出/返回值: Promise<void>
  *
- *  8. handleNonStreamingResponse(res: http.ServerResponse,
- *       response: vscode.LanguageModelChatResponse, requestId: string,
- *       model: string, context: object): Promise<void>
+ *  8. handleNonStreamingResponse(response: vscode.LanguageModelChatResponse,
+ *       res: http.ServerResponse, context: EnhancedRequestContext,
+ *       requestLogger: RequestLogger, preferLegacyFunctionCall: boolean,
+ *       requiresToolCall: boolean, requiredModeParam: string): Promise<void>
  *     - 功能说明: 非流式 JSON 响应处理
  *     - 输入参数:
- *         res: http.ServerResponse — HTTP 响应对象
  *         response: vscode.LanguageModelChatResponse — LM 响应流
- *         requestId: string — 请求唯一标识
- *         model: string — 模型标识符
- *         context: object — 工具调用上下文
+ *         res: http.ServerResponse — HTTP 响应对象
+ *         context: EnhancedRequestContext — 增强请求上下文
+ *         requestLogger: RequestLogger — 请求级日志记录器
+ *         preferLegacyFunctionCall: boolean — 是否优先使用旧版 function_call 格式
+ *         requiresToolCall: boolean — 是否为必需工具调用模式
+ *         requiredModeParam: string — 必需模式参数名（用于错误报告）
  *     - 输出/返回值: Promise<void>
  *
  *  9. isRequiredToolMode(toolChoice?: any, functionCall?: any): boolean

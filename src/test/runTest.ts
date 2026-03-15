@@ -63,7 +63,13 @@
  *      - 输入：fn — 待执行函数, messagePattern — 错误消息匹配模式
  *
  *   8. checks (const CheckCase[])
- *      - 功能说明：17 个检查用例定义
+ *      - 功能说明：37 个检查用例定义
+ *      - 覆盖模块：ModelCapabilities, ModelDiscoveryService, Validator,
+ *        RequestHandler, CopilotServer, Converter, RateLimiter
+ *      - 新增检查：
+ *        · 'Converter supports ThinkingPart as reasoning_content in responses'
+ *        · 'Streaming response supports stream_options.include_usage for token reporting'
+ *        · 'Error responses use OpenAI-compatible format with proper type mapping'
  */
 
 import * as assert from 'assert';

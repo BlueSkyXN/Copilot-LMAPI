@@ -34,7 +34,8 @@
  *   1. OpenAIMessage（接口）
  *      - 功能：聊天消息，支持 system/user/assistant/tool/function 角色
  *      - 关键字段：role (string), content (string | 多模态数组 | null),
- *                 tool_calls? (OpenAIToolCall[]), tool_call_id? (string), name? (string)
+ *                 tool_calls? (OpenAIToolCall[]), tool_call_id? (string), name? (string),
+ *                 function_call? (OpenAIFunctionCall), reasoning_content? (string)
  *
  *   2. OpenAIFunction（接口）
  *      - 功能：函数定义
@@ -46,7 +47,7 @@
  *
  *   4. OpenAIToolCall（接口）
  *      - 功能：工具调用
- *      - 关键字段：id (string), type ('function'), function (OpenAIFunctionCall), index? (number)
+ *      - 关键字段：id (string), type ('function'), function (OpenAIFunctionCall)
  *
  *   5. OpenAITool（接口）
  *      - 功能：工具定义
@@ -63,16 +64,19 @@
  *   8. OpenAICompletionRequest（接口）
  *      - 功能：聊天补全请求
  *      - 关键字段：model (string), messages (OpenAIMessage[]), stream? (boolean),
- *                 temperature? (number, 默认 0.7), max_tokens? (number),
- *                 tools? (OpenAITool[]), functions? (OpenAIFunction[])
+ *                 temperature? (number), max_tokens? (number),
+ *                 tools? (OpenAITool[]), functions? (OpenAIFunction[]),
+ *                 stream_options? ({ include_usage?: boolean } | null),
+ *                 x_lmapi? ({ model_options?: Record<string, unknown> })
  *
  *   9. OpenAIUsage（接口）
  *      - 功能：令牌用量统计
- *      - 关键字段：prompt_tokens (number), completion_tokens (number), total_tokens (number)
+ *      - 关键字段：prompt_tokens (number), completion_tokens (number), total_tokens (number),
+ *                 completion_tokens_details? ({ reasoning_tokens?: number })
  *
  *   10. OpenAIChoice（接口）
  *       - 功能：非流式候选回复
- *       - 关键字段：index (number), message (object), finish_reason (string | null)
+ *       - 关键字段：index (number), message? (OpenAIMessage), finish_reason (string | null)
  *
  *   11. OpenAICompletionResponse（接口）
  *       - 功能：非流式完整响应
@@ -81,16 +85,19 @@
  *
  *   12. OpenAIStreamChoice（接口）
  *       - 功能：流式候选回复增量
- *       - 关键字段：index (number), delta (object), finish_reason (string | null)
+ *       - 关键字段：index (number), delta (object — 含 role?, content?,
+ *                  reasoning_content?, function_call?, tool_calls?),
+ *                  finish_reason (string | null)
  *
  *   13. OpenAIStreamResponse（接口）
  *       - 功能：流式响应
  *       - 关键字段：id (string), object ('chat.completion.chunk'), model (string),
- *                  choices (OpenAIStreamChoice[])
+ *                  choices (OpenAIStreamChoice[]), usage? (OpenAIUsage | null)
  *
  *   14. OpenAIModel（接口）
  *       - 功能：模型信息
- *       - 关键字段：id (string), object ('model'), owned_by (string)
+ *       - 关键字段：id (string), object ('model'), owned_by (string),
+ *                  x_lmapi? (能力/限制/来源等扩展信息)
  *
  *   15. OpenAIModelsResponse（接口）
  *       - 功能：模型列表响应
@@ -98,19 +105,22 @@
  *
  *   16. OpenAIError（接口）
  *       - 功能：错误信息
- *       - 关键字段：message (string), type (string), code (string | number | null)
+ *       - 关键字段：error.message (string), error.type (string),
+ *                  error.param? (string), error.code? (string)
  *
  *   17. OpenAIErrorResponse（接口）
  *       - 功能：错误响应
- *       - 关键字段：error (OpenAIError)
+ *       - 关键字段：error (OpenAIError['error'])
  *
  *   18. ValidatedRequest（接口，extends OpenAICompletionRequest）
- *       - 功能：经验证的请求，附加验证元数据
- *       - 附加字段：_validated (true), _requestId (string), _timestamp (number)
+ *       - 功能：经验证的请求，关键字段强制非可选
+ *       - 覆盖字段：model (string), messages (OpenAIMessage[]),
+ *                  stream (boolean), temperature (number), max_tokens? (number)
  *
  *   19. SSEEvent（类型）
  *       - 功能：SSE 事件类型
- *       - 取值：{ type: 'data', data: string } | { type: 'done' } | { type: 'error', error: string }
+ *       - 取值：{ type: 'data', data: OpenAIStreamResponse } | { type: 'done' }
+ *              | { type: 'error', error: OpenAIError['error'] }
  */
 
 /**
