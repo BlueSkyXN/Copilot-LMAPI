@@ -2,7 +2,7 @@
   "name": "copilot-lmapi-bridge",
   "displayName": "Copilot-LMAPI",
   "description": "Bridge VS Code Copilot Language Model API to OpenAI-compatible HTTP API",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "publisher": "copilot-bridge",
   "engines": {
     "vscode": "^1.92.0"
@@ -101,6 +101,11 @@
           "minimum": 60000,
           "maximum": 3600000,
           "description": "Model health check interval in milliseconds (default: 10 minutes)"
+        },
+        "copilot-lmapi.disableTokenLimit": {
+          "type": "boolean",
+          "default": false,
+          "description": "When enabled, skip prompt token limit validation against maxInputTokens. Useful for models that accept longer contexts than reported."
         }
       }
     },

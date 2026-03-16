@@ -129,6 +129,8 @@ export const DEFAULT_CONFIG = {
     maxConcurrentRequests: 10,
     /** 单个请求的超时时间 (毫秒) */
     requestTimeout: 120000, // 2 分钟
+    /** 是否跳过 prompt token 上限检查（默认 false，开启后不再拒绝超出 maxInputTokens 的请求） */
+    disableTokenLimit: false,
 } as const;
 
 /** 各类输入参数的合法范围限制, 用于 Validator 校验 */

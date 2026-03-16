@@ -285,10 +285,11 @@ const checks: CheckCase[] = [
                 'Model discovery should not keep heuristic capability probes or inferred output-token limits'
             );
             assert.ok(
-                content.includes('const canBridgeTransportNativeImages = false;') &&
+                content.includes('canBridgeTransportNativeImages') &&
+                content.includes('(vscode as any).LanguageModelDataPart') &&
                 content.includes('supportsVision: effectiveVisionState === \'supported\'') &&
                 content.includes('supportsMultimodal: effectiveVisionState === \'supported\''),
-                'LMAPI-only discovery should avoid pretending that native image transport exists when the bridge cannot send image parts'
+                'LMAPI-only discovery should detect DataPart at runtime to determine native image transport capability'
             );
         }
     },
@@ -632,14 +633,26 @@ const checks: CheckCase[] = [
     },
     {
         /** 验证 Converter 不会因为 supportsVision=false 而拒绝 image_url，只会转成文本上下文继续发送 */
-        name: 'Converter treats image_url as hint-only transport input',
+        name: 'Converter supports native DataPart image transport with text fallback',
         run: () => {
             const content = readRepoFile('src/utils/Converter.ts');
+            // 验证运行时 DataPart 检测缓存
             assert.ok(
-                !content.includes('模型 ${selectedModel.id} 不支持视觉，跳过图像') &&
-                content.includes('const imageContent = await this.processImageContent(part.image_url.url);') &&
-                content.includes('textContent += `\\n[Image: ${part.image_url.url}]\\n`;'),
-                'Converter should not block image_url based on capability hints and should always degrade to descriptive text context'
+                content.includes('private static _dataPartCtor') &&
+                content.includes('private static get DataPartCtor()') &&
+                content.includes('(vscode as any).LanguageModelDataPart'),
+                'Converter should have cached runtime detection for LanguageModelDataPart'
+            );
+            // 验证原生图片传输路径
+            assert.ok(
+                content.includes('DataPartCtor && url.startsWith(\'data:image/\')') &&
+                content.includes('new DataPartCtor(new Uint8Array(binaryData), mimeType)'),
+                'Converter should attempt native DataPart for base64 data URIs when available'
+            );
+            // 验证降级路径保留
+            assert.ok(
+                content.includes('const imageContent = await this.processImageContent(url)'),
+                'Converter should fallback to text description when DataPart unavailable'
             );
         }
     },
@@ -727,6 +740,222 @@ const checks: CheckCase[] = [
             } finally {
                 (Date as { now: () => number }).now = originalNow;
             }
+        }
+    },
+    {
+        /**
+         * Converter.countTokensOfficial 存在且签名正确
+         *
+         * 验证 Converter 中包含公开静态方法 countTokensOfficial，
+         * 接受 model + input 参数并返回 Promise<number>。
+         */
+        name: 'Converter exposes countTokensOfficial with fallback path',
+        run: () => {
+            const converterSrc = fs.readFileSync(
+                path.join(repoRoot(), 'src', 'utils', 'Converter.ts'),
+                'utf-8'
+            );
+            // 验证公开方法存在
+            assert.ok(
+                converterSrc.includes('public static async countTokensOfficial('),
+                'countTokensOfficial must be a public static async method'
+            );
+            // 验证接受 LanguageModelChat 模型参数
+            assert.ok(
+                converterSrc.includes('model: vscode.LanguageModelChat'),
+                'countTokensOfficial must accept a LanguageModelChat model'
+            );
+            // 验证降级路径存在
+            assert.ok(
+                converterSrc.includes('estimateTokensFallback'),
+                'countTokensOfficial must have estimateTokensFallback for graceful degradation'
+            );
+            // 验证 try-catch 保护（API 调用失败不应中断请求）
+            assert.ok(
+                converterSrc.includes('countTokens API call failed, falling back'),
+                'countTokensOfficial must catch API errors and fall back'
+            );
+        }
+    },
+    {
+        /**
+         * RequestHandler 在 token 验证前先转换消息格式并使用精确计数
+         *
+         * 验证请求处理流水线中消息转换在 token 限制检查之前执行，
+         * 且使用 countTokensOfficial 替代了粗略估算。
+         */
+        name: 'RequestHandler uses countTokensOfficial for prompt token validation',
+        run: () => {
+            const handlerSrc = fs.readFileSync(
+                path.join(repoRoot(), 'src', 'server', 'RequestHandler.ts'),
+                'utf-8'
+            );
+            // 验证调用了 countTokensOfficial
+            assert.ok(
+                handlerSrc.includes('Converter.countTokensOfficial('),
+                'RequestHandler must use Converter.countTokensOfficial for token counting'
+            );
+            // 验证 convertMessagesToVSCode 在 countTokensOfficial 之前执行
+            const convertIdx = handlerSrc.indexOf('convertMessagesToVSCode(');
+            const countIdx = handlerSrc.indexOf('countTokensOfficial(');
+            assert.ok(
+                convertIdx < countIdx,
+                'Message conversion must happen before countTokensOfficial call'
+            );
+            // 验证 context.estimatedTokens 被精确值更新
+            assert.ok(
+                handlerSrc.includes('context.estimatedTokens = promptTokens'),
+                'Must update context.estimatedTokens with precise countTokens result'
+            );
+        }
+    },
+    {
+        /**
+         * RequestHandler 对非流式响应使用精确 completion token 计数
+         *
+         * 验证非流式路径中使用 countTokensOfficial 计算 completion tokens
+         * 并传给 createCompletionResponse。
+         */
+        name: 'RequestHandler uses precise completion tokens in non-streaming response',
+        run: () => {
+            const handlerSrc = fs.readFileSync(
+                path.join(repoRoot(), 'src', 'server', 'RequestHandler.ts'),
+                'utf-8'
+            );
+            // 验证在 handleNonStreamingResponse 中使用了 countTokensOfficial
+            const nonStreamIdx = handlerSrc.indexOf('handleNonStreamingResponse(');
+            const afterNonStream = handlerSrc.substring(nonStreamIdx);
+            assert.ok(
+                afterNonStream.includes('preciseCompletionTokens'),
+                'Non-streaming path must compute preciseCompletionTokens'
+            );
+            assert.ok(
+                afterNonStream.includes('Converter.countTokensOfficial('),
+                'Non-streaming path must call countTokensOfficial for completion tokens'
+            );
+        }
+    },
+    {
+        /**
+         * createCompletionResponse 接受可选的精确 completion token 参数
+         *
+         * 验证 createCompletionResponse 支持 preciseCompletionTokens 参数，
+         * 并在提供时优先使用精确值。
+         */
+        name: 'Converter createCompletionResponse accepts precise token count',
+        run: () => {
+            const converterSrc = fs.readFileSync(
+                path.join(repoRoot(), 'src', 'utils', 'Converter.ts'),
+                'utf-8'
+            );
+            assert.ok(
+                converterSrc.includes('preciseCompletionTokens?: number'),
+                'createCompletionResponse must accept optional preciseCompletionTokens'
+            );
+            // 验证优先使用精确值，降级到估算
+            assert.ok(
+                converterSrc.includes('preciseCompletionTokens ??'),
+                'Must use nullish coalescing to prefer precise tokens over estimation'
+            );
+        }
+    },
+    {
+        /**
+         * RequestHandler 记录被忽略的 OpenAI 参数
+         *
+         * 验证 buildModelOptions 中检测并记录无法转发到 LMAPI 的参数（如 top_p, n, user）。
+         */
+        name: 'RequestHandler logs ignored OpenAI params not forwarded to LMAPI',
+        run: () => {
+            const handlerSrc = fs.readFileSync(
+                path.join(repoRoot(), 'src', 'server', 'RequestHandler.ts'),
+                'utf-8'
+            );
+            // 验证对 top_p 的检测
+            assert.ok(
+                handlerSrc.includes("requestData.top_p !== undefined"),
+                'buildModelOptions must detect top_p as an ignored param'
+            );
+            // 验证对 n 的检测（仅当 n != 1 时）
+            assert.ok(
+                handlerSrc.includes("requestData.n !== undefined && requestData.n !== 1"),
+                'buildModelOptions must detect n>1 as an ignored param'
+            );
+            // 验证对 user 的检测
+            assert.ok(
+                handlerSrc.includes("requestData.user !== undefined"),
+                'buildModelOptions must detect user as an ignored param'
+            );
+            // 验证有日志输出
+            assert.ok(
+                handlerSrc.includes('not forwarded to LMAPI'),
+                'Must log that params are not forwarded'
+            );
+        }
+    },
+    {
+        /**
+         * disableTokenLimit 配置项控制 token 上限检查
+         *
+         * 验证 RequestHandler 中存在 disableTokenLimit 读取逻辑，
+         * 且在开启时跳过 token 限制拒绝、仅输出警告日志。
+         */
+        name: 'RequestHandler supports disableTokenLimit config to bypass token check',
+        run: () => {
+            const handlerSrc = fs.readFileSync(
+                path.join(repoRoot(), 'src', 'server', 'RequestHandler.ts'),
+                'utf-8'
+            );
+            // 验证读取配置
+            assert.ok(
+                handlerSrc.includes("get<boolean>('disableTokenLimit'"),
+                'Must read disableTokenLimit from VS Code config'
+            );
+            // 验证跳过逻辑
+            assert.ok(
+                handlerSrc.includes('!disableTokenLimit && promptTokens > selectedModel.maxInputTokens'),
+                'Must gate token limit rejection on disableTokenLimit being false'
+            );
+            // 验证超限时有警告日志
+            assert.ok(
+                handlerSrc.includes('token limit check is disabled'),
+                'Must warn when exceeding limit with check disabled'
+            );
+            // 验证 Config.ts 有默认值
+            const configSrc = fs.readFileSync(
+                path.join(repoRoot(), 'src', 'constants', 'Config.ts'),
+                'utf-8'
+            );
+            assert.ok(
+                configSrc.includes('disableTokenLimit: false'),
+                'DEFAULT_CONFIG must define disableTokenLimit as false'
+            );
+        }
+    },
+    {
+        /**
+         * ModelDiscoveryService 运行时 DataPart 检测
+         *
+         * 验证 canBridgeTransportNativeImages 不再硬编码为 false，
+         * 而是通过运行时检测 LanguageModelDataPart 决定。
+         */
+        name: 'ModelDiscoveryService detects DataPart at runtime for vision support',
+        run: () => {
+            const discoverySrc = fs.readFileSync(
+                path.join(repoRoot(), 'src', 'services', 'ModelDiscoveryService.ts'),
+                'utf-8'
+            );
+            // 不应再硬编码 canBridgeTransportNativeImages = false
+            assert.ok(
+                !discoverySrc.includes('const canBridgeTransportNativeImages = false'),
+                'Must NOT hardcode canBridgeTransportNativeImages = false'
+            );
+            // 应有运行时检测逻辑
+            assert.ok(
+                discoverySrc.includes('(vscode as any).LanguageModelDataPart') &&
+                discoverySrc.includes('canBridgeTransportNativeImages'),
+                'Must detect LanguageModelDataPart at runtime to determine bridge transport capability'
+            );
         }
     }
 ];

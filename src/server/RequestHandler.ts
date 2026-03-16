@@ -208,6 +208,7 @@ import { OpenAIFunction, OpenAITool, ValidatedRequest } from '../types/OpenAI';
 
 import { ServerState } from '../types/VSCode';
 import {
+    DEFAULT_CONFIG,
     LIMITS,
     HTTP_STATUS,
     CONTENT_TYPES,
@@ -464,23 +465,40 @@ export class RequestHandler {
                 return;
             }
             
-            // 验证请求的预估令牌数是否超出所选模型的上下文窗口限制
-            if (context.estimatedTokens > selectedModel.maxInputTokens) {
+            // 将 OpenAI 格式的消息转换为 VS Code LM API 格式（含多模态内容处理）
+            // 需在 token 计数之前完成，因为 countTokens 需要 VS Code 格式的消息
+            const vsCodeMessages = await Converter.convertMessagesToVSCode(
+                messages, 
+                selectedModel
+            );
+
+            // 使用官方 countTokens API 精确计算 prompt token 数（降级到估算）
+            const promptTokens = await Converter.countTokensOfficial(
+                selectedModel.vsCodeModel,
+                vsCodeMessages
+            );
+            context.estimatedTokens = promptTokens;
+
+            // 验证精确 prompt token 数是否超出所选模型的上下文窗口限制
+            // 可通过 copilot-lmapi.disableTokenLimit 设置跳过此检查
+            const disableTokenLimit = vscode.workspace.getConfiguration('copilot-lmapi')
+                .get<boolean>('disableTokenLimit', DEFAULT_CONFIG.disableTokenLimit);
+            if (!disableTokenLimit && promptTokens > selectedModel.maxInputTokens) {
                 this.sendErrorResponse(
                     res,
                     HTTP_STATUS.BAD_REQUEST,
-                    `Request exceeds model context limit (${context.estimatedTokens} > ${selectedModel.maxInputTokens} tokens)`,
+                    `Request exceeds model context limit (${promptTokens} > ${selectedModel.maxInputTokens} tokens)`,
                     ERROR_CODES.INVALID_REQUEST,
                     requestId
                 );
                 return;
             }
-            
-            // 将 OpenAI 格式的消息转换为 VS Code LM API 格式（含多模态内容处理）
-            const vsCodeMessages = await Converter.convertMessagesToVSCode(
-                messages, 
-                selectedModel
-            );
+            if (disableTokenLimit && promptTokens > selectedModel.maxInputTokens) {
+                requestLogger.warn(
+                    `Prompt tokens (${promptTokens}) exceed model limit (${selectedModel.maxInputTokens}), ` +
+                    `but token limit check is disabled — forwarding to model`
+                );
+            }
             
             // 如果请求包含工具/函数定义，准备 VS Code 格式的工具配置
             // 同时支持现代 tools 数组和旧版 functions 数组
@@ -1066,13 +1084,23 @@ export class RequestHandler {
                 );
                 return;
             }
+
+            // 使用官方 countTokens 精确计算 completion token 数
+            const completionText = `${fullResponse.content}${fullResponse.toolCalls
+                .map(call => `${call.function.name}${call.function.arguments}`)
+                .join('')}`;
+            const preciseCompletionTokens = await Converter.countTokensOfficial(
+                context.selectedModel!.vsCodeModel,
+                completionText
+            );
             
             const completionResponse = Converter.createCompletionResponse(
                 fullResponse.content, 
                 context,
                 context.selectedModel!,
                 fullResponse.toolCalls,
-                preferLegacyFunctionCall
+                preferLegacyFunctionCall,
+                preciseCompletionTokens
             );
             
             res.writeHead(HTTP_STATUS.OK, { 'Content-Type': CONTENT_TYPES.JSON });
@@ -1223,11 +1251,31 @@ export class RequestHandler {
      * - 顶层标准字段优先于 `x_lmapi.model_options` 中的同名项
      * - 仅转发当前桥可以自证安全/兼容的有限白名单
      * - 未知键直接过滤，避免 provider 因未知参数拒绝请求
+     * - 记录被忽略的 OpenAI 标准参数，方便客户端排查行为差异
+     *
+     * @returns 包含 modelOptions 和被忽略参数列表的元组
      */
     private buildModelOptions(
         requestData: ValidatedRequest,
         requestLogger: RequestLogger
     ): Record<string, string | number | boolean | string[]> | undefined {
+        // 检测客户端设置了但 LMAPI 无法转发的 OpenAI 标准参数
+        const ignoredParams: string[] = [];
+        if (requestData.top_p !== undefined) {
+            ignoredParams.push('top_p');
+        }
+        if (requestData.n !== undefined && requestData.n !== 1) {
+            ignoredParams.push(`n (requested ${requestData.n}, only 1 supported)`);
+        }
+        if (requestData.user !== undefined) {
+            ignoredParams.push('user');
+        }
+        if (ignoredParams.length > 0) {
+            requestLogger.info('OpenAI params accepted but not forwarded to LMAPI (no equivalent in modelOptions):', {
+                ignoredParams
+            });
+        }
+
         const candidateOptions: Record<string, unknown> = {
             ...(requestData.x_lmapi?.model_options ?? {})
         };

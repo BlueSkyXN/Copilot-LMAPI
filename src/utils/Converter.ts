@@ -29,7 +29,7 @@
  * - 使用 ToolConversionState 跟踪待匹配的工具调用 ID，支持旧版 function 消息的自动关联
  * - 流式模式下在必需工具调用场景（requiresToolCall）中缓冲事件，直到第一个工具调用出现
  * - 角色映射策略：system/user/tool/function 均映射为 VS Code User 角色
- * - 令牌估算采用字符数/4 + 特殊字符数的近似算法
+ * - 令牌计数优先使用官方 countTokens API，降级到字符数/4 + 特殊字符数的近似算法
  *
  * ═══════════════════════════════════════════════════════
  * 函数/类清单
@@ -58,10 +58,13 @@
  *      - 功能：转换工具结果消息
  *
  *   5. convertMultimodalMessage(message: EnhancedMessage): Promise<vscode.LanguageModelChatMessage>
- *      - 功能：转换多模态消息
+ *      - 功能：转换多模态消息（支持原生 DataPart 图片传输 + 文本描述降级）
+ *
+ *   5a. DataPartCtor (private static getter)
+ *      - 功能：运行时检测 LanguageModelDataPart 是否可用（缓存结果）
  *
  *   6. processImageContent(imageUrl: string): Promise<{description: string, data?: any} | null>
- *      - 功能：处理图片内容
+ *      - 功能：处理图片内容（文本描述降级路径）
  *
  *   7. extractTextContent(message: EnhancedMessage): string
  *      - 功能：提取文本内容
@@ -122,7 +125,7 @@
  *      - 功能：创建 SSE 事件
  *
  *  26. estimateTokens(text: string): number
- *      - 功能：估算令牌数
+ *      - 功能：估算令牌数（粗略字符除法，作为 countTokensOfficial 的降级方案）
  *
  *  27. createEnhancedContext(requestId: string, model: string, isStream: boolean, startTime: number, clientIP?: string, userAgent?: string, request?: any): EnhancedRequestContext
  *      - 功能：创建增强上下文
@@ -132,6 +135,17 @@
  *
  *  29. createErrorResponse(message: string, type: string, param?: string, code?: string): OpenAIError
  *      - 功能：创建错误响应
+ *
+ *  30. countTokensOfficial(model: vscode.LanguageModelChat, input: string | vscode.LanguageModelChatMessage | vscode.LanguageModelChatMessage[], token?: vscode.CancellationToken): Promise<number>
+ *      - 功能：使用官方 countTokens API 精确计算 token 数，失败时降级到 estimateTokens
+ *      - 输入：model — 已选择的 VS Code LM 模型实例, input — 文本或消息, token — 取消令牌
+ *      - 输出：Promise<number>
+ *
+ *  31. estimateTokensFallback(input: string | vscode.LanguageModelChatMessage | vscode.LanguageModelChatMessage[]): number
+ *      - 功能：countTokensOfficial 的降级路径
+ *
+ *  32. extractTextFromMessage(msg: vscode.LanguageModelChatMessage): string
+ *      - 功能：从 VS Code 消息中提取纯文本（支持 instanceof 和鸭子类型）
  */
 
 import * as vscode from 'vscode';
@@ -189,6 +203,34 @@ interface StreamExtractionOptions {
  * 3. 辅助功能 - 令牌估算、角色映射、上下文创建、健康检查响应等
  */
 export class Converter {
+
+    // LanguageModelDataPart 运行时检测缓存
+    // 该类在 @types/vscode 中尚未声明，但 VS Code 运行时已无条件导出
+    private static _dataPartCtor: ((new (data: Uint8Array, mimeType: string) => any) | null) | undefined = undefined;
+
+    /**
+     * 运行时检测 LanguageModelDataPart 是否可用
+     *
+     * VS Code 在 extHost.api.impl.ts 中无条件导出 LanguageModelDataPart（无 proposedApi 门控），
+     * 但 @types/vscode 尚未包含其类型声明。通过 `(vscode as any).LanguageModelDataPart` 访问，
+     * 结果缓存在静态字段中避免重复检测。
+     */
+    private static get DataPartCtor(): (new (data: Uint8Array, mimeType: string) => any) | null {
+        if (this._dataPartCtor === undefined) {
+            try {
+                const ctor = (vscode as any).LanguageModelDataPart;
+                this._dataPartCtor = (typeof ctor === 'function') ? ctor : null;
+            } catch {
+                this._dataPartCtor = null;
+            }
+            if (this._dataPartCtor) {
+                logger.info('LanguageModelDataPart available at runtime — native image transport enabled');
+            } else {
+                logger.info('LanguageModelDataPart not available — images will be sent as text descriptions');
+            }
+        }
+        return this._dataPartCtor as (new (data: Uint8Array, mimeType: string) => any) | null;
+    }
     
     /**
      * 将增强消息数组转换为 VS Code Language Model API 格式
@@ -388,31 +430,65 @@ export class Converter {
         if (!Array.isArray(message.content)) {
             return null;
         }
-        
-        const contentParts: (vscode.LanguageModelTextPart | vscode.LanguageModelToolResultPart)[] = [];
-        let textContent = this.formatRolePrefix(message.role);
+
+        const DataPartCtor = this.DataPartCtor;
+        // 类型放宽为 any[] 因为 LanguageModelDataPart 不在 @types/vscode 声明中
+        const contentParts: any[] = [];
+        let textBuffer = this.formatRolePrefix(message.role);
         
         for (const part of message.content) {
             if (part.type === 'text' && part.text) {
-                textContent += part.text;
+                textBuffer += part.text;
                 
             } else if (part.type === 'image_url' && part.image_url) {
+                const url = part.image_url.url;
+
+                // 尝试原生 DataPart 传输（仅 base64 data URI）
+                if (DataPartCtor && url.startsWith('data:image/')) {
+                    try {
+                        const commaIdx = url.indexOf(',');
+                        if (commaIdx === -1) { throw new Error('Invalid data URI: no comma separator'); }
+                        const header = url.substring(0, commaIdx);
+                        const base64Data = url.substring(commaIdx + 1);
+                        if (!base64Data) { throw new Error('Invalid data URI: empty base64 data'); }
+                        const mimeType = header.match(/data:([^;]+)/)?.[1] || 'image/jpeg';
+                        if (!mimeType.startsWith('image/')) { throw new Error(`Non-image MIME type: ${mimeType}`); }
+                        const binaryData = Buffer.from(base64Data, 'base64');
+                        if (binaryData.length === 0) { throw new Error('Invalid data URI: decoded to empty buffer'); }
+
+                        // 先 flush 已积累的文本
+                        if (textBuffer.trim()) {
+                            contentParts.push(new vscode.LanguageModelTextPart(textBuffer));
+                            textBuffer = '';
+                        }
+                        contentParts.push(new DataPartCtor(new Uint8Array(binaryData), mimeType));
+                        logger.debug(`Native image part: ${mimeType}, ${binaryData.length} bytes`);
+                        continue;
+                    } catch (error) {
+                        logger.warn(`原生图片传输失败，降级到文本描述：`, error as Error);
+                        // 降级到下方文本描述路径
+                    }
+                }
+
+                // 文本描述降级路径（DataPart 不可用 / 非 base64 / 解析失败）
                 try {
-                    const imageContent = await this.processImageContent(part.image_url.url);
+                    const imageContent = await this.processImageContent(url);
                     if (imageContent) {
-                        textContent += `\n[Image: ${imageContent.description}]\n`;
+                        textBuffer += `\n[Image: ${imageContent.description}]\n`;
                     } else {
-                        textContent += `\n[Image: ${part.image_url.url}]\n`;
+                        textBuffer += `\n[Image: ${url.substring(0, 80)}]\n`;
                     }
                 } catch (error) {
                     logger.warn(`处理图像失败：`, error as Error);
-                    textContent += `\n[Image: ${part.image_url.url}]\n`;
+                    textBuffer += `\n[Image: ${url.substring(0, 80)}]\n`;
                 }
             }
         }
         
-        // 添加文本部分
-        contentParts.push(new vscode.LanguageModelTextPart(textContent));
+        // flush 剩余文本
+        if (textBuffer.trim()) {
+            contentParts.push(new vscode.LanguageModelTextPart(textBuffer));
+        }
         
         // 使用正确的角色映射创建消息
         return new vscode.LanguageModelChatMessage(
@@ -732,13 +808,15 @@ export class Converter {
         context: EnhancedRequestContext,
         selectedModel: ModelCapabilities,
         toolCalls: ToolCall[] = [],
-        preferLegacyFunctionCall: boolean = false
+        preferLegacyFunctionCall: boolean = false,
+        preciseCompletionTokens?: number
     ): OpenAICompletionResponse {
         const now = Math.floor(Date.now() / 1000);
         const openAIToolCalls = toolCalls.map(call => this.convertToolCallToOpenAI(call));
         const isToolResponse = openAIToolCalls.length > 0;
         const useLegacyFunctionCall = preferLegacyFunctionCall && openAIToolCalls.length === 1;
-        const completionTokens = this.estimateTokens(content) + this.estimateToolCallTokens(toolCalls);
+        // 优先使用精确 completion token 数；降级到估算
+        const completionTokens = preciseCompletionTokens ?? (this.estimateTokens(content) + this.estimateToolCallTokens(toolCalls));
         // 根据工具调用情况决定 finish_reason：旧版单调用 -> function_call，新版 -> tool_calls，无调用 -> stop
         const finishReason = isToolResponse
             ? (useLegacyFunctionCall ? 'function_call' : 'tool_calls')
@@ -916,7 +994,7 @@ export class Converter {
                     'Tool and vision flags are advisory hints only; the bridge still attempts requests and lets the runtime/provider decide.',
                     'Stable selectChatModels exposes id/vendor/family/version/maxInputTokens. Capabilities/thinking parts currently live behind newer or proposed VS Code LM API surfaces.',
                     'There is no stable LM API field in this build for model-specific reasoning effort or thinking budget controls; use request-side x_lmapi.model_options only as provider-specific passthrough.',
-                    'Current bridge transport does not send native image parts, so image_url inputs are forwarded as descriptive text context unless a future runtime surface is wired in.'
+                    'Bridge supports native image transport via runtime-detected LanguageModelDataPart when available (base64 data URIs only); falls back to descriptive text context otherwise.'
                 ]
             }
         }));
@@ -1189,7 +1267,92 @@ export class Converter {
         const specialTokens = (text.match(/[\n\r\t]/g) || []).length;
         return baseTokens + specialTokens;
     }
-    
+
+    /**
+     * 使用官方 countTokens API 精确计算 token 数量
+     *
+     * 优先使用 LanguageModelChat.countTokens()（稳定公开 API），
+     * 该方法接受 string 或 LanguageModelChatMessage。
+     * 对消息数组逐条求和。失败时降级到本地 estimateTokens 估算。
+     *
+     * @param model - 已选择的 VS Code LM 模型实例
+     * @param input - 待计算的文本字符串、单条消息或消息数组
+     * @param token - 可选的取消令牌
+     * @returns 精确的 token 数量；API 不可用或调用失败时返回估算值
+     */
+    public static async countTokensOfficial(
+        model: vscode.LanguageModelChat,
+        input: string | vscode.LanguageModelChatMessage | vscode.LanguageModelChatMessage[],
+        token?: vscode.CancellationToken
+    ): Promise<number> {
+        try {
+            if (typeof model.countTokens !== 'function') {
+                return this.estimateTokensFallback(input);
+            }
+
+            if (typeof input === 'string') {
+                return await model.countTokens(input, token);
+            }
+
+            if (Array.isArray(input)) {
+                let total = 0;
+                for (const message of input) {
+                    total += await model.countTokens(message, token);
+                }
+                return total;
+            }
+
+            // 单条 LanguageModelChatMessage
+            return await model.countTokens(input, token);
+        } catch (error) {
+            logger.warn('countTokens API call failed, falling back to estimation:', error as Error);
+            return this.estimateTokensFallback(input);
+        }
+    }
+
+    /**
+     * countTokensOfficial 的降级路径：从输入中提取文本后用 estimateTokens 估算
+     */
+    private static estimateTokensFallback(
+        input: string | vscode.LanguageModelChatMessage | vscode.LanguageModelChatMessage[]
+    ): number {
+        if (typeof input === 'string') {
+            return this.estimateTokens(input);
+        }
+        if (Array.isArray(input)) {
+            return input.reduce((total, msg) => {
+                return total + this.estimateTokens(this.extractTextFromMessage(msg));
+            }, 0);
+        }
+        // 单条消息
+        return this.estimateTokens(this.extractTextFromMessage(input));
+    }
+
+    /**
+     * 从 VS Code LanguageModelChatMessage 中提取纯文本内容
+     *
+     * 同时支持 instanceof 类型检测和鸭子类型回退（.value 属性），
+     * 确保在各种运行时环境下都能正确提取文本。
+     */
+    private static extractTextFromMessage(msg: vscode.LanguageModelChatMessage): string {
+        return msg.content
+            .map(part => {
+                if (part instanceof vscode.LanguageModelTextPart) {
+                    return part.value;
+                }
+                // 鸭子类型回退：某些环境下 instanceof 可能不匹配
+                if ('value' in part && typeof (part as { value: unknown }).value === 'string') {
+                    return (part as { value: string }).value;
+                }
+                // DataPart (图片) 按 85 token 估算（OpenAI low-detail tile 基准）
+                if ('mimeType' in part && 'data' in part) {
+                    return ' '.repeat(340);
+                }
+                return '';
+            })
+            .join('');
+    }
+
     /**
      * 创建增强请求上下文对象
      *

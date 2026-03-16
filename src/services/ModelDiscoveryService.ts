@@ -353,7 +353,14 @@ export class ModelDiscoveryService {
             : lmapiToolState
                 ? 'lmapi-proposed-capabilities'
                 : existing?.toolSupportSource ?? 'not-exposed-by-lmapi';
-        const canBridgeTransportNativeImages = false;
+        // 运行时检测 LanguageModelDataPart 是否可用（无 proposedApi 门控，VS Code 已无条件导出）
+        let canBridgeTransportNativeImages = false;
+        try {
+            const ctor = (vscode as any).LanguageModelDataPart;
+            canBridgeTransportNativeImages = typeof ctor === 'function';
+        } catch {
+            // 保持 false
+        }
         const effectiveVisionState = proposedVisionState === 'supported' && !canBridgeTransportNativeImages
             ? 'unknown'
             : proposedVisionState;
