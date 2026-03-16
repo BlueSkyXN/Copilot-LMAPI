@@ -108,6 +108,14 @@
  * 17. DEBUG (const object)
  *     - 功能说明: 开发/调试标志, 通过 NODE_ENV 自动区分环境
  *     - 关键变量: VERBOSE_LOGGING, DETAILED_ERRORS, ENABLE_METRICS
+ *
+ * 18. KNOWN_OPENAI_PARAMS (const ReadonlySet<string>)
+ *     - 功能说明: OpenAI Chat Completions API 已知参数名全集, 用于区分"已知不支持"与"未知参数"
+ *     - 包含: 桥接器已处理的参数 + OpenAI 标准但桥不支持的参数 (logit_bias, seed, response_format 等)
+ *
+ * 19. HANDLED_OPENAI_PARAMS (const ReadonlySet<string>)
+ *     - 功能说明: 桥接器已处理（转发至 LMAPI 或内部消费）的参数子集
+ *     - 包含: model, messages, stream, temperature, max_tokens, stop, tools 等
  */
 
 /** VS Code 配置节名称, 对应 settings.json 中 "copilot-lmapi.*" 前缀 */
@@ -241,6 +249,42 @@ export const ERROR_CODES = {
     OVERLOADED_ERROR: 'overloaded_error',
     TIMEOUT_ERROR: 'timeout_error',
 } as const;
+
+/**
+ * OpenAI Chat Completions API 已知参数名集合
+ *
+ * 用于在 Validator 层检测客户端发送了哪些不在桥接器支持范围内的参数，
+ * 并在日志中给出透明提示。此处列出 OpenAI 官方文档中的全部可选字段，
+ * 无论桥是否支持，均视为"已知参数"——只要出现在此集合中，就不会产生
+ * "未知参数"警告，而是走各自的"接受/忽略/不支持"逻辑。
+ *
+ * 不在此集合中的字段才会被标记为"未知参数"（unknown），
+ * 帮助用户发现拼写错误或误用第三方扩展字段。
+ */
+export const KNOWN_OPENAI_PARAMS: ReadonlySet<string> = new Set([
+    // 桥接器已处理（转发或内部使用）
+    'model', 'messages', 'stream', 'temperature', 'max_tokens',
+    'top_p', 'n', 'stop', 'presence_penalty', 'frequency_penalty',
+    'user', 'functions', 'function_call', 'tools', 'tool_choice',
+    'stream_options', 'x_lmapi',
+    // OpenAI 标准参数，桥接器不支持但识别（不产生"未知"警告）
+    'logit_bias', 'logprobs', 'top_logprobs', 'seed',
+    'response_format', 'service_tier', 'parallel_tool_calls',
+    'store', 'metadata', 'max_completion_tokens',
+]) as ReadonlySet<string>;
+
+/**
+ * 桥接器已处理（转发至 LMAPI 或内部消费）的参数子集
+ *
+ * 不在此集合但在 KNOWN_OPENAI_PARAMS 中的参数，
+ * 将被标记为"已知但不支持"并记入日志。
+ */
+export const HANDLED_OPENAI_PARAMS: ReadonlySet<string> = new Set([
+    'model', 'messages', 'stream', 'temperature', 'max_tokens',
+    'stop', 'presence_penalty', 'frequency_penalty',
+    'functions', 'function_call', 'tools', 'tool_choice',
+    'stream_options', 'x_lmapi',
+]) as ReadonlySet<string>;
 
 /** 日志级别常量, 供 Logger 模块区分输出级别 */
 export const LOG_LEVELS = {

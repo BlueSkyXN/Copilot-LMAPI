@@ -1554,7 +1554,11 @@ export class RequestHandler {
             message.includes('model options') ||
             /\bunsupported\s+(request\s+)?option/i.test(message) ||
             /\bunknown\s+(request\s+)?option/i.test(message) ||
-            /\binvalid\s+(request\s+)?option/i.test(message)
+            /\binvalid\s+(request\s+)?option/i.test(message) ||
+            /\bdoes not support\s+(parameter|option)/i.test(message) ||
+            /\bparameter\s+\S+\s+is not supported/i.test(message) ||
+            /\bunrecognized\s+(request\s+)?(parameter|option)/i.test(message) ||
+            /\b(extra|unexpected)\s+(field|parameter|option)/i.test(message)
         );
     }
 

@@ -63,13 +63,15 @@
  *      - 输入：fn — 待执行函数, messagePattern — 错误消息匹配模式
  *
  *   8. checks (const CheckCase[])
- *      - 功能说明：37 个检查用例定义
+ *      - 功能说明：39 个检查用例定义
  *      - 覆盖模块：ModelCapabilities, ModelDiscoveryService, Validator,
  *        RequestHandler, CopilotServer, Converter, RateLimiter
  *      - 新增检查：
  *        · 'Converter supports ThinkingPart as reasoning_content in responses'
  *        · 'Streaming response supports stream_options.include_usage for token reporting'
  *        · 'Error responses use OpenAI-compatible format with proper type mapping'
+ *        · 'Validator detects known-but-unsupported and unknown request params'
+ *        · 'ModelOptions error detection covers broad error patterns'
  */
 
 import * as assert from 'assert';
@@ -1086,6 +1088,75 @@ const checks: CheckCase[] = [
                 converterSrc.includes('param: param ?? null') &&
                 converterSrc.includes('code: code ?? null'),
                 'Converter createErrorResponse must default absent fields to null per OpenAI spec'
+            );
+        }
+    },
+    {
+        name: 'Validator detects known-but-unsupported and unknown request params',
+        run() {
+            // 验证 Config 中定义了参数识别集合
+            const configSrc = readRepoFile('src/constants/Config.ts');
+            assert.ok(
+                configSrc.includes('KNOWN_OPENAI_PARAMS') &&
+                configSrc.includes('HANDLED_OPENAI_PARAMS'),
+                'Config must define KNOWN_OPENAI_PARAMS and HANDLED_OPENAI_PARAMS sets'
+            );
+
+            // 验证 KNOWN_OPENAI_PARAMS 包含所有已知的 OpenAI 标准参数
+            for (const param of ['logit_bias', 'logprobs', 'top_logprobs', 'seed', 'response_format']) {
+                assert.ok(
+                    configSrc.includes(`'${param}'`),
+                    `KNOWN_OPENAI_PARAMS must include '${param}'`
+                );
+            }
+
+            // 验证 HANDLED_OPENAI_PARAMS 包含桥接器实际处理的参数
+            for (const param of ['model', 'messages', 'stream', 'temperature', 'max_tokens', 'stop']) {
+                assert.ok(
+                    configSrc.includes(`'${param}'`) ,
+                    `HANDLED_OPENAI_PARAMS must include '${param}'`
+                );
+            }
+
+            // 验证 Validator 导入并使用参数集合
+            const validatorSrc = readRepoFile('src/utils/Validator.ts');
+            assert.ok(
+                validatorSrc.includes('KNOWN_OPENAI_PARAMS') &&
+                validatorSrc.includes('HANDLED_OPENAI_PARAMS'),
+                'Validator must import and use KNOWN_OPENAI_PARAMS and HANDLED_OPENAI_PARAMS'
+            );
+
+            // 验证 detectUnsupportedParams 方法存在
+            assert.ok(
+                validatorSrc.includes('detectUnsupportedParams'),
+                'Validator must implement detectUnsupportedParams method'
+            );
+
+            // 验证分类逻辑：已知不支持 vs 未知参数
+            assert.ok(
+                validatorSrc.includes('knownButUnsupported') &&
+                validatorSrc.includes('unknown'),
+                'detectUnsupportedParams must distinguish known-unsupported from unknown params'
+            );
+        }
+    },
+    {
+        name: 'ModelOptions error detection covers broad error patterns',
+        run() {
+            const handlerSrc = readRepoFile('src/server/RequestHandler.ts');
+
+            // 验证宽泛的 modelOptions 错误匹配模式
+            assert.ok(
+                handlerSrc.includes('does not support') &&
+                handlerSrc.includes('is not supported') &&
+                handlerSrc.includes('unrecognized'),
+                'isLikelyModelOptionsError must match broad error patterns including does-not-support and unrecognized'
+            );
+
+            // 验证 extra/unexpected 字段也被匹配
+            assert.ok(
+                handlerSrc.includes('extra') && handlerSrc.includes('unexpected'),
+                'isLikelyModelOptionsError must also match extra/unexpected field errors'
             );
         }
     }

@@ -158,6 +158,12 @@
  *      - 功能：验证主机地址
  *      - 输出：string
  *      - 访问级别：public static
+ *
+ *  28. detectUnsupportedParams(request: Record<string, unknown>): void
+ *      - 功能：检测请求中未被桥接器处理的参数并记录透明日志
+ *      - 输入：request — 原始请求体对象
+ *      - 分类：已知不支持 (knownButUnsupported) / 未知 (unknown)
+ *      - 访问级别：private static
  */
 
 import { 
@@ -173,7 +179,7 @@ import {
     OpenAIToolChoice,
     ValidatedRequest
 } from '../types/OpenAI';
-import { LIMITS, ERROR_CODES } from '../constants/Config';
+import { LIMITS, ERROR_CODES, KNOWN_OPENAI_PARAMS, HANDLED_OPENAI_PARAMS } from '../constants/Config';
 import { logger } from './Logger';
 
 /**
@@ -309,6 +315,9 @@ export class Validator {
             validatedRequest.stream_options = this.validateStreamOptions(request.stream_options);
         }
         
+        // 参数透明度检测：识别客户端发送了但桥接器未处理的参数
+        this.detectUnsupportedParams(request);
+        
         return validatedRequest;
     }
 
@@ -370,9 +379,51 @@ export class Validator {
 
         return validated;
     }
+
+    /**
+     * 检测请求中未被桥接器处理的参数并记录透明日志
+     *
+     * 将请求体的所有顶层 key 分为三类：
+     * 1. 已处理 (HANDLED_OPENAI_PARAMS) — 桥接器会转发或内部消费，无需提示
+     * 2. 已知但不支持 — OpenAI 标准参数，桥接器识别但不转发，INFO 级别提示
+     * 3. 未知 — 非 OpenAI 标准字段（可能是拼写错误或第三方扩展），WARN 级别提示
+     *
+     * @param request - 原始请求体对象
+     */
+    private static detectUnsupportedParams(request: Record<string, unknown>): void {
+        const requestKeys = Object.keys(request);
+        const knownButUnsupported: string[] = [];
+        const unknown: string[] = [];
+
+        for (const key of requestKeys) {
+            if (request[key] === undefined) {
+                continue;
+            }
+            if (HANDLED_OPENAI_PARAMS.has(key)) {
+                continue;
+            }
+            if (KNOWN_OPENAI_PARAMS.has(key)) {
+                knownButUnsupported.push(key);
+            } else {
+                unknown.push(key);
+            }
+        }
+
+        if (knownButUnsupported.length > 0) {
+            logger.info(
+                'Request contains OpenAI params not supported by this bridge (silently ignored):',
+                { params: knownButUnsupported }
+            );
+        }
+        if (unknown.length > 0) {
+            logger.warn(
+                'Request contains unrecognized params (not part of OpenAI API, check for typos):',
+                { params: unknown }
+            );
+        }
+    }
     
     /**
-     * 验证支持多模态的增强消息列表
      *
      * 检查消息数组的类型、长度限制，逐条验证消息格式，
      * 并在最后校验工具调用与结果消息之间的关联关系。
