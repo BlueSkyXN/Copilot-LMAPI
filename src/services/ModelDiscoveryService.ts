@@ -34,7 +34,13 @@
  *      - 输出：ModelDiscoveryService 实例
  *
  *   2. discoverAllModels(): Promise<ModelCapabilities[]>
- *      - 功能：发现所有可用模型，调用 vscode.lm.selectChatModels() 并分析能力
+ *      - 功能：发现所有可用模型（带并发互斥锁，防止多个调用竞态写入缓存）
+ *      - 输入：无
+ *      - 输出：Promise<ModelCapabilities[]> — 所有已发现模型的能力列表
+ *      - 关键变量：activeDiscoveryPromise — 进行中的发现 Promise，用于并发复用
+ *
+ *   2b. executeDiscovery(): Promise<ModelCapabilities[]>（私有）
+ *      - 功能：模型发现的实际执行逻辑，由 discoverAllModels() 通过互斥锁调用
  *      - 输入：无
  *      - 输出：Promise<ModelCapabilities[]> — 所有已发现模型的能力列表
  *
@@ -162,6 +168,8 @@ export class ModelDiscoveryService {
     private refreshTimer?: NodeJS.Timeout;
     /** 后台健康检查定时器 */
     private healthCheckTimer?: NodeJS.Timeout;
+    /** 并发发现互斥锁：存储进行中的发现 Promise，防止多个 discoverAllModels 并发执行导致缓存竞态 */
+    private activeDiscoveryPromise?: Promise<ModelCapabilities[]>;
     
     /** 模型事件的公开可订阅接口，外部可通过此属性监听模型状态变化 */
     public readonly onModelEvent: vscode.Event<ModelEvent>;
@@ -225,6 +233,29 @@ export class ModelDiscoveryService {
      * @throws 当模型发现过程整体失败时抛出错误
      */
     public async discoverAllModels(): Promise<ModelCapabilities[]> {
+        // 并发互斥：如果已有发现流程在执行中，直接复用其 Promise 避免竞态写入 modelCache
+        if (this.activeDiscoveryPromise) {
+            logger.info('Model discovery already in progress, reusing existing promise');
+            return this.activeDiscoveryPromise;
+        }
+
+        this.activeDiscoveryPromise = this.executeDiscovery();
+        try {
+            return await this.activeDiscoveryPromise;
+        } finally {
+            this.activeDiscoveryPromise = undefined;
+        }
+    }
+
+    /**
+     * 模型发现的实际执行逻辑（内部方法）
+     *
+     * 由 discoverAllModels() 调用，通过 activeDiscoveryPromise 互斥锁确保同一时间只有一个实例运行。
+     *
+     * @returns 所有已发现且可用的模型能力列表
+     * @throws 当模型发现过程整体失败时抛出错误
+     */
+    private async executeDiscovery(): Promise<ModelCapabilities[]> {
         logger.info('Starting dynamic model discovery...');
 
         try {

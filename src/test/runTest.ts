@@ -7,10 +7,10 @@
  * - 动态加载依赖 vscode 的 Validator 模块
  * - 定义并运行一系列检查用例，覆盖以下模块的关键行为：
  *   - ModelCapabilities —— 类型字段合规性
- *   - ModelDiscoveryService —— 能力探测与缓存重建机制
+ *   - ModelDiscoveryService —— 能力探测、缓存重建、并发互斥锁机制
  *   - Validator —— 工具调用关联、歧义检测、字段约束
- *   - RequestHandler —— SSE 延迟发送、取消令牌链接、状态标志、缓存 TTL
- *   - CopilotServer —— 未授权请求限流
+ *   - RequestHandler —— SSE 延迟发送、取消令牌链接、状态标志、缓存 TTL、IP 清洗
+ *   - CopilotServer —— 未授权请求限流、Token 展示安全、HMAC 时序安全认证
  *   - Converter —— 必需工具模式下的流缓冲
  *   - RateLimiter —— 滑动窗口与令牌桶的行为验证
  * - 汇总检查结果并设置进程退出码
@@ -1202,6 +1202,87 @@ const checks: CheckCase[] = [
             assert.ok(
                 handlerSrc.includes('multimodalSupport: true'),
                 'Status endpoint features.multimodalSupport must be true (image transport is supported)'
+            );
+        }
+    },
+
+    // ── 安全审计修复验证 ──────────────────────────────────────
+
+    {
+        name: 'ModelDiscoveryService uses concurrency guard for discoverAllModels',
+        run() {
+            const src = readRepoFile('src/services/ModelDiscoveryService.ts');
+
+            // 验证存在 activeDiscoveryPromise 互斥锁字段
+            assert.ok(
+                src.includes('activeDiscoveryPromise'),
+                'ModelDiscoveryService must declare activeDiscoveryPromise for concurrency guard'
+            );
+
+            // 验证 discoverAllModels 在进行中时复用现有 Promise
+            assert.ok(
+                src.includes('if (this.activeDiscoveryPromise)'),
+                'discoverAllModels must check activeDiscoveryPromise to prevent concurrent execution'
+            );
+
+            // 验证 finally 块中清除互斥锁
+            assert.ok(
+                src.includes('this.activeDiscoveryPromise = undefined'),
+                'activeDiscoveryPromise must be cleared in finally block'
+            );
+        }
+    },
+    {
+        name: 'Bearer token not exposed in notification text',
+        run() {
+            const src = readRepoFile('src/server/CopilotServer.ts');
+
+            // 验证通知文本中不包含完整 Bearer Token
+            assert.ok(
+                !src.includes('Bearer Token: ${this.bearerToken}'),
+                'Notification text must NOT contain full bearer token (security risk)'
+            );
+
+            // 验证通过 Copy Token 按钮提供 Token
+            assert.ok(
+                src.includes("'Copy Token'"),
+                'Server should offer a Copy Token action button instead of showing token in text'
+            );
+        }
+    },
+    {
+        name: 'Token auth uses SHA-256 hash for timing-safe comparison without length leak',
+        run() {
+            const src = readRepoFile('src/server/CopilotServer.ts');
+
+            // 验证使用 SHA-256 哈希而非直接 Buffer 长度比较
+            assert.ok(
+                src.includes("createHash('sha256')"),
+                'Token validation must use SHA-256 hash for constant-length timing-safe comparison'
+            );
+
+            // 验证不再有基于 Buffer 长度的提前返回
+            assert.ok(
+                !src.includes('providedToken.length !== expectedToken.length'),
+                'Token validation must NOT use length-based early return (timing leak)'
+            );
+        }
+    },
+    {
+        name: 'X-Forwarded-For header is validated against IP format to prevent log injection',
+        run() {
+            const src = readRepoFile('src/server/RequestHandler.ts');
+
+            // 验证 getClientIP 移除 IPv6 区域标识符
+            assert.ok(
+                src.includes(".replace(/%.*$/, '')"),
+                'getClientIP must strip IPv6 zone identifiers'
+            );
+
+            // 验证对提取的 IP 进行 IPv4/IPv6 格式校验
+            assert.ok(
+                src.includes('[0-9]{1,3}') && src.includes('[0-9a-fA-F]'),
+                'getClientIP must validate IP format with IPv4/IPv6 regex patterns'
             );
         }
     }

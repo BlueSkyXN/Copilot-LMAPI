@@ -370,11 +370,21 @@ export class CopilotServer {
                     });
 
                     const authSummary = this.bearerToken
-                        ? ` | Bearer Token: ${this.bearerToken}`
+                        ? ` | Auth: enabled`
                         : ' | Auth: disabled';
-                    vscode.window.showInformationMessage(
-                        `${NOTIFICATIONS.SERVER_STARTED} on http://${serverHost}:${serverPort}${authSummary}`
-                    );
+                    const startMsg = `${NOTIFICATIONS.SERVER_STARTED} on http://${serverHost}:${serverPort}${authSummary}`;
+
+                    if (this.bearerToken) {
+                        // 通过按钮动作复制完整 Token，避免在通知文本中暴露凭证
+                        vscode.window.showInformationMessage(startMsg, 'Copy Token').then(action => {
+                            if (action === 'Copy Token') {
+                                vscode.env.clipboard.writeText(this.bearerToken!);
+                                vscode.window.showInformationMessage('Bearer Token copied to clipboard');
+                            }
+                        });
+                    } else {
+                        vscode.window.showInformationMessage(startMsg);
+                    }
 
                     resolve();
                 });
@@ -555,17 +565,16 @@ export class CopilotServer {
             return false;
         }
 
-        // 将 Token 转换为 Buffer 进行比较:
-        // timingSafeEqual 要求两个 Buffer 长度相同，因此先检查长度
+        // 使用 SHA-256 哈希后比较，确保长度恒定且无时序泄漏:
+        // - 对双方 Token 做 SHA-256 哈希，产出固定 32 字节摘要
+        // - 用 timingSafeEqual 比较摘要，无需前置长度检查
+        // - 即使提供的 Token 长度不同，哈希输出长度恒定，不会泄漏长度信息
         const providedToken = Buffer.from(match[1], 'utf8');
         const expectedToken = Buffer.from(this.bearerToken, 'utf8');
+        const providedHash = crypto.createHash('sha256').update(providedToken).digest();
+        const expectedHash = crypto.createHash('sha256').update(expectedToken).digest();
 
-        if (providedToken.length !== expectedToken.length) {
-            return false;
-        }
-
-        // 常量时间比较，无论 Token 在哪个位置不匹配，比较耗时都相同
-        return crypto.timingSafeEqual(providedToken, expectedToken);
+        return crypto.timingSafeEqual(providedHash, expectedHash);
     }
 
     /**

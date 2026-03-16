@@ -1829,14 +1829,24 @@ export class RequestHandler {
      *
      * 优先从 X-Forwarded-For 头部获取（支持反向代理场景），
      * 其次从 socket 连接获取，最后回退到 127.0.0.1。
+     * 对提取到的值进行 IPv4/IPv6 格式校验，不合法则回退到安全默认值，
+     * 防止日志注入和畸形输入。
      *
      * @param req - HTTP 请求对象
-     * @returns 客户端 IP 地址字符串
+     * @returns 经过校验的客户端 IP 地址字符串
      */
     private getClientIP(req: http.IncomingMessage): string {
-        return (req.headers['x-forwarded-for'] as string)?.split(',')[0] ||
+        let raw = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ||
                req.socket?.remoteAddress ||
                '127.0.0.1';
+        // 移除 IPv6 区域标识符（如 %eth0）
+        raw = raw.replace(/%.*$/, '');
+        // 校验 IPv4 或 IPv6 格式，不合法则回退到安全默认值
+        if (/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(raw) ||
+            /^(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$/.test(raw)) {
+            return raw.substring(0, 45);
+        }
+        return '127.0.0.1';
     }
     
     /**
