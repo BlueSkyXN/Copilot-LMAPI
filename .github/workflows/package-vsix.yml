@@ -5,9 +5,8 @@
 name: Package VSIX
 
 on:
-  # 推送触发：当 main 或 dev 分支的 TypeScript 源码发生变更时触发
+  # 推送触发：任意分支的 TypeScript 源码变更时触发
   push:
-    branches: [ main, dev ]
     paths:
       - 'src/**/*.ts'
   # 拉取请求触发：当向 main 或 dev 分支发起 PR 时触发
