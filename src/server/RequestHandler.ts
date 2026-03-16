@@ -1100,7 +1100,8 @@ export class RequestHandler {
                 context.selectedModel!,
                 fullResponse.toolCalls,
                 preferLegacyFunctionCall,
-                preciseCompletionTokens
+                preciseCompletionTokens,
+                fullResponse.reasoningContent
             );
             
             res.writeHead(HTTP_STATUS.OK, { 'Content-Type': CONTENT_TYPES.JSON });

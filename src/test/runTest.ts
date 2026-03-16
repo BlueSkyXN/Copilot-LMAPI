@@ -957,6 +957,43 @@ const checks: CheckCase[] = [
                 'Must detect LanguageModelDataPart at runtime to determine bridge transport capability'
             );
         }
+    },
+    {
+        /**
+         * ThinkingPart 运行时检测与 reasoning_content 支持
+         *
+         * 验证 Converter 有 ThinkingPart 检测、流式/非流式均处理推理内容，
+         * OpenAI 类型定义包含 reasoning_content 字段。
+         */
+        name: 'Converter supports ThinkingPart as reasoning_content in responses',
+        run: () => {
+            const converterSrc = readRepoFile('src/utils/Converter.ts');
+            // 运行时检测
+            assert.ok(
+                converterSrc.includes('private static _thinkingPartCtor') &&
+                converterSrc.includes('private static get ThinkingPartCtor()') &&
+                converterSrc.includes('(vscode as any).LanguageModelThinkingPart'),
+                'Converter must have cached runtime detection for LanguageModelThinkingPart'
+            );
+            // 流式处理
+            assert.ok(
+                converterSrc.includes('delta.reasoning_content = thinkingText'),
+                'Streaming must emit ThinkingPart as reasoning_content in delta'
+            );
+            // 非流式处理
+            assert.ok(
+                converterSrc.includes('reasoningContent') &&
+                converterSrc.includes('message.reasoning_content = reasoningContent'),
+                'Non-streaming must include reasoning_content in completion message'
+            );
+            // OpenAI 类型
+            const typesSrc = readRepoFile('src/types/OpenAI.ts');
+            assert.ok(
+                typesSrc.includes('reasoning_content?: string') &&
+                typesSrc.includes('reasoning_tokens?: number'),
+                'OpenAI types must define reasoning_content and reasoning_tokens fields'
+            );
+        }
     }
 ];
 

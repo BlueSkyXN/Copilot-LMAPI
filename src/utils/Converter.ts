@@ -63,6 +63,12 @@
  *   5a. DataPartCtor (private static getter)
  *      - 功能：运行时检测 LanguageModelDataPart 是否可用（缓存结果）
  *
+ *   5b. ThinkingPartCtor (private static getter)
+ *      - 功能：运行时检测 LanguageModelThinkingPart 是否可用（缓存结果）
+ *
+ *   5c. getThinkingContent(chunk: unknown): string | null
+ *      - 功能：检查流式 chunk 是否为 ThinkingPart 并提取文本
+ *
  *   6. processImageContent(imageUrl: string): Promise<{description: string, data?: any} | null>
  *      - 功能：处理图片内容（文本描述降级路径）
  *
@@ -162,7 +168,8 @@ import {
     OpenAIStreamResponse, 
     OpenAIModelsResponse,
     OpenAIModel,
-    OpenAIToolCall
+    OpenAIToolCall,
+    OpenAIUsage
 } from '../types/OpenAI';
 import { logger } from './Logger';
 
@@ -208,6 +215,9 @@ export class Converter {
     // 该类在 @types/vscode 中尚未声明，但 VS Code 运行时已无条件导出
     private static _dataPartCtor: ((new (data: Uint8Array, mimeType: string) => any) | null) | undefined = undefined;
 
+    // LanguageModelThinkingPart 运行时检测缓存
+    private static _thinkingPartCtor: (Function | null) | undefined = undefined;
+
     /**
      * 运行时检测 LanguageModelDataPart 是否可用
      *
@@ -230,6 +240,45 @@ export class Converter {
             }
         }
         return this._dataPartCtor as (new (data: Uint8Array, mimeType: string) => any) | null;
+    }
+
+    /**
+     * 运行时检测 LanguageModelThinkingPart 是否可用
+     *
+     * 同 DataPart，ThinkingPart 也在 extHost.api.impl.ts 中无条件导出。
+     * 用于 instanceof 检查以识别流式响应中的思考/推理内容。
+     */
+    private static get ThinkingPartCtor(): Function | null {
+        if (this._thinkingPartCtor === undefined) {
+            try {
+                const ctor = (vscode as any).LanguageModelThinkingPart;
+                this._thinkingPartCtor = (typeof ctor === 'function') ? ctor : null;
+            } catch {
+                this._thinkingPartCtor = null;
+            }
+            if (this._thinkingPartCtor) {
+                logger.info('LanguageModelThinkingPart available at runtime — reasoning_content streaming enabled');
+            } else {
+                logger.info('LanguageModelThinkingPart not available — thinking content will be ignored');
+            }
+        }
+        return this._thinkingPartCtor as (Function | null);
+    }
+
+    /**
+     * 检查给定的流式 chunk 是否为 ThinkingPart 实例
+     *
+     * @param chunk - 流式响应中的一个 part
+     * @returns 如果是 ThinkingPart 则返回其文本值，否则返回 null
+     */
+    private static getThinkingContent(chunk: unknown): string | null {
+        const ThinkingCtor = this.ThinkingPartCtor;
+        if (!ThinkingCtor) { return null; }
+        if (!(chunk instanceof ThinkingCtor)) { return null; }
+        const value = (chunk as { value?: string | string[] }).value;
+        if (typeof value === 'string') { return value; }
+        if (Array.isArray(value)) { return value.join(''); }
+        return null;
     }
     
     /**
@@ -809,7 +858,8 @@ export class Converter {
         selectedModel: ModelCapabilities,
         toolCalls: ToolCall[] = [],
         preferLegacyFunctionCall: boolean = false,
-        preciseCompletionTokens?: number
+        preciseCompletionTokens?: number,
+        reasoningContent?: string
     ): OpenAICompletionResponse {
         const now = Math.floor(Date.now() / 1000);
         const openAIToolCalls = toolCalls.map(call => this.convertToolCallToOpenAI(call));
@@ -829,6 +879,10 @@ export class Converter {
             content: messageContent
         };
 
+        if (reasoningContent) {
+            message.reasoning_content = reasoningContent;
+        }
+
         if (isToolResponse) {
             if (useLegacyFunctionCall && openAIToolCalls[0]) {
                 message.function_call = openAIToolCalls[0].function;
@@ -836,22 +890,30 @@ export class Converter {
                 message.tool_calls = openAIToolCalls;
             }
         }
+
+        const usage: OpenAIUsage = {
+            prompt_tokens: context.estimatedTokens,
+            completion_tokens: completionTokens,
+            total_tokens: context.estimatedTokens + completionTokens
+        };
+
+        // 如果有推理内容，估算推理 token 并添加详情
+        if (reasoningContent) {
+            const reasoningTokens = this.estimateTokens(reasoningContent);
+            usage.completion_tokens_details = { reasoning_tokens: reasoningTokens };
+        }
         
         return {
             id: `chatcmpl-${context.requestId}`,
             object: 'chat.completion',
             created: now,
-            model: context.model, // 使用请求的模型名称
+            model: context.model,
             choices: [{
                 index: 0,
                 message,
                 finish_reason: finishReason
             }],
-            usage: {
-                prompt_tokens: context.estimatedTokens,
-                completion_tokens: completionTokens,
-                total_tokens: context.estimatedTokens + completionTokens
-            },
+            usage,
             system_fingerprint: `vs-code-${selectedModel.vendor}-${selectedModel.family}`
         };
     }
@@ -1111,8 +1173,14 @@ export class Converter {
                         }
                     }];
                     emittedToolCallIndex++;
-                } else if (typeof chunk === 'string' && chunk) {
-                    delta.content = chunk;
+                } else {
+                    // ThinkingPart 运行时检测（不在 @types/vscode 中）
+                    const thinkingText = this.getThinkingContent(chunk);
+                    if (thinkingText) {
+                        delta.reasoning_content = thinkingText;
+                    } else if (typeof chunk === 'string' && chunk) {
+                        delta.content = chunk;
+                    }
                 }
 
                 if (Object.keys(delta).length > 0) {
@@ -1203,8 +1271,9 @@ export class Converter {
      */
     public static async collectFullResponse(
         response: vscode.LanguageModelChatResponse
-    ): Promise<{ content: string; toolCalls: ToolCall[] }> {
+    ): Promise<{ content: string; toolCalls: ToolCall[]; reasoningContent?: string }> {
         let fullContent = '';
+        let reasoningContent = '';
         const toolCalls: ToolCall[] = [];
         
         try {
@@ -1213,8 +1282,13 @@ export class Converter {
                     fullContent += chunk.value;
                 } else if (chunk instanceof vscode.LanguageModelToolCallPart) {
                     toolCalls.push(this.convertVSCodeToolCallPart(chunk));
-                } else if (typeof chunk === 'string') {
-                    fullContent += chunk;
+                } else {
+                    const thinkingText = this.getThinkingContent(chunk);
+                    if (thinkingText) {
+                        reasoningContent += thinkingText;
+                    } else if (typeof chunk === 'string') {
+                        fullContent += chunk;
+                    }
                 }
             }
         } catch (error) {
@@ -1222,7 +1296,7 @@ export class Converter {
             throw new Error('收集响应内容失败');
         }
         
-        return { content: fullContent, toolCalls };
+        return { content: fullContent, toolCalls, ...(reasoningContent ? { reasoningContent } : {}) };
     }
     
     /**

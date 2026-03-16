@@ -154,6 +154,8 @@ export interface OpenAIMessage {
     tool_call_id?: string;
     /** assistant 消息中携带的函数调用信息（旧版 functions 格式） */
     function_call?: OpenAIFunctionCall;
+    /** 推理/思考内容（对应 o1/Claude 等模型的 chain-of-thought 输出，可选） */
+    reasoning_content?: string;
 }
 
 /**
@@ -299,6 +301,11 @@ export interface OpenAIUsage {
     completion_tokens: number;
     /** 总令牌消耗数（prompt_tokens + completion_tokens） */
     total_tokens: number;
+    /** 补全令牌详情（可选） */
+    completion_tokens_details?: {
+        /** 推理/思考消耗的令牌数 */
+        reasoning_tokens?: number;
+    };
 }
 
 /**
@@ -359,6 +366,8 @@ export interface OpenAIStreamChoice {
         role?: 'assistant';
         /** 新增的文本内容片段 */
         content?: string;
+        /** 推理/思考内容片段（对应 o1/Claude 等模型的 chain-of-thought 输出） */
+        reasoning_content?: string;
         /** 函数调用的增量信息（旧版格式，可能分多个 chunk 传输） */
         function_call?: Partial<OpenAIFunctionCall>;
         /**
