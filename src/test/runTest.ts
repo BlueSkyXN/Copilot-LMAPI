@@ -63,7 +63,7 @@
  *      - 输入：fn — 待执行函数, messagePattern — 错误消息匹配模式
  *
  *   8. checks (const CheckCase[])
- *      - 功能说明：39 个检查用例定义
+ *      - 功能说明：41 个检查用例定义
  *      - 覆盖模块：ModelCapabilities, ModelDiscoveryService, Validator,
  *        RequestHandler, CopilotServer, Converter, RateLimiter
  *      - 新增检查：
@@ -72,6 +72,8 @@
  *        · 'Error responses use OpenAI-compatible format with proper type mapping'
  *        · 'Validator detects known-but-unsupported and unknown request params'
  *        · 'ModelOptions error detection covers broad error patterns'
+ *        · 'Streaming loop checks cancellation token and connection state'
+ *        · 'Status endpoint reports multimodalSupport as true'
  */
 
 import * as assert from 'assert';
@@ -1157,6 +1159,49 @@ const checks: CheckCase[] = [
             assert.ok(
                 handlerSrc.includes('extra') && handlerSrc.includes('unexpected'),
                 'isLikelyModelOptionsError must also match extra/unexpected field errors'
+            );
+        }
+    },
+    {
+        name: 'Streaming loop checks cancellation token and connection state',
+        run() {
+            const handlerSrc = readRepoFile('src/server/RequestHandler.ts');
+
+            // 验证 handleStreamingResponse 接受 cancellationToken 参数
+            assert.ok(
+                handlerSrc.includes('cancellationToken?: vscode.CancellationToken'),
+                'handleStreamingResponse must accept optional CancellationToken parameter'
+            );
+
+            // 验证流式循环中检查取消令牌
+            assert.ok(
+                handlerSrc.includes('cancellationToken?.isCancellationRequested'),
+                'Streaming loop must check isCancellationRequested during iteration'
+            );
+
+            // 验证流式循环中检查连接销毁状态
+            assert.ok(
+                handlerSrc.includes('res.destroyed'),
+                'Streaming loop must check res.destroyed to detect client disconnect'
+            );
+
+            // 验证调用方传递了 requestCancellation.token
+            const callSiteMatches = handlerSrc.match(/handleStreamingResponse\([^)]*requestCancellation\.token/g);
+            assert.ok(
+                callSiteMatches && callSiteMatches.length >= 2,
+                'Both primary and fallback streaming calls must pass requestCancellation.token'
+            );
+        }
+    },
+    {
+        name: 'Status endpoint reports multimodalSupport as true',
+        run() {
+            const handlerSrc = readRepoFile('src/server/RequestHandler.ts');
+
+            // 验证 multimodalSupport 标记为 true（服务器支持图像传输）
+            assert.ok(
+                handlerSrc.includes('multimodalSupport: true'),
+                'Status endpoint features.multimodalSupport must be true (image transport is supported)'
             );
         }
     }

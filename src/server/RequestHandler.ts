@@ -89,8 +89,10 @@
  *  7. handleStreamingResponse(response: vscode.LanguageModelChatResponse,
  *       res: http.ServerResponse, context: EnhancedRequestContext,
  *       requestLogger: RequestLogger, requiresToolCall: boolean,
- *       requiredModeParam: string, includeUsage?: boolean): Promise<void>
+ *       requiredModeParam: string, includeUsage?: boolean,
+ *       cancellationToken?: vscode.CancellationToken): Promise<void>
  *     - 功能说明: SSE 流式响应处理（延迟头部发送，直到收到第一个数据块；支持 include_usage）
+ *       流式输出过程中持续检查取消令牌和连接状态，确保客户端断开或服务器停止时及时终止
  *     - 输入参数:
  *         response: vscode.LanguageModelChatResponse — LM 响应流
  *         res: http.ServerResponse — HTTP 响应对象
@@ -99,6 +101,7 @@
  *         requiresToolCall: boolean — 是否为必需工具调用模式
  *         requiredModeParam: string — 必需模式参数名（用于错误报告）
  *         includeUsage?: boolean — 是否在流末尾附带 token 用量统计（默认 false）
+ *         cancellationToken?: vscode.CancellationToken — 请求取消令牌（客户端断开/超时/服务器停止时触发）
  *     - 输出/返回值: Promise<void>
  *
  *  8. handleNonStreamingResponse(response: vscode.LanguageModelChatResponse,
@@ -631,7 +634,8 @@ export class RequestHandler {
                                 requestLogger,
                                 requiresToolCall,
                                 requiredModeParam,
-                                includeUsage
+                                includeUsage,
+                                requestCancellation.token
                             );
                         } catch (responseError) {
                             if (
@@ -666,7 +670,8 @@ export class RequestHandler {
                                 requestLogger,
                                 requiresToolCall,
                                 requiredModeParam,
-                                includeUsage
+                                includeUsage,
+                                requestCancellation.token
                             );
                         }
                     } else {
@@ -925,7 +930,7 @@ export class RequestHandler {
                 },
                 features: {
                     dynamicModelDiscovery: true,
-                    multimodalSupport: false,
+                    multimodalSupport: true,
                     functionCalling: true,
                     noHardcodedLimitations: true,
                     loadBalancing: false
@@ -969,6 +974,8 @@ export class RequestHandler {
      * @param requestLogger - 带请求 ID 的日志记录器
      * @param requiresToolCall - 是否为强制工具调用模式
      * @param requiredModeParam - 触发强制模式的参数名称（'tool_choice' 或 'function_call'）
+     * @param includeUsage - 是否在流末尾附带 token 用量统计
+     * @param cancellationToken - 请求取消令牌，客户端断开/超时/服务器停止时触发
      * @returns 处理完成的 Promise
      */
     private async handleStreamingResponse(
@@ -978,7 +985,8 @@ export class RequestHandler {
         requestLogger: RequestLogger,
         requiresToolCall: boolean,
         requiredModeParam: string,
-        includeUsage: boolean = false
+        includeUsage: boolean = false,
+        cancellationToken?: vscode.CancellationToken
     ): Promise<void> {
         try {
             requestLogger.info('Starting streaming response...');
@@ -995,6 +1003,17 @@ export class RequestHandler {
                     includeUsage
                 }
             )) {
+                // 流式输出期间检查取消信号和连接状态
+                // 客户端断开、请求超时或服务器停止时应尽快终止，避免浪费资源
+                if (cancellationToken?.isCancellationRequested || res.destroyed) {
+                    requestLogger.info(
+                        `Streaming aborted after ${chunkCount} chunks: ${
+                            cancellationToken?.isCancellationRequested ? 'request cancelled' : 'connection destroyed'
+                        }`
+                    );
+                    break;
+                }
+
                 // 延迟发送 SSE 头部：直到收到第一个数据块才写入响应头
                 // 这样流开始前的错误仍可返回标准 JSON 格式
                 if (!res.headersSent) {
