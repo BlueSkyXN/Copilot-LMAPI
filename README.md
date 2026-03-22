@@ -31,7 +31,7 @@
 
 ```json
 {
-    "copilot-lmapi.port": 8001,
+    "copilot-lmapi.port": 58001,
     "copilot-lmapi.host": "127.0.0.1",
     "copilot-lmapi.authToken": "",
     "copilot-lmapi.autoStart": false,
@@ -47,7 +47,7 @@
 
 | 设置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `port` | number | `8001` | HTTP 服务器端口 (1024-65535) |
+| `port` | number | `58001` | HTTP 服务器端口 (1024-65535) |
 | `host` | string | `"127.0.0.1"` | 服务器主机地址（仅本地访问）|
 | `authToken` | string | `""` | 可选固定 Bearer Token；留空时关闭 HTTP 鉴权 |
 | `autoStart` | boolean | `false` | VS Code 启动时自动启动服务器 |
@@ -160,7 +160,7 @@ GET /status
 ### 服务器指标
 访问实时指标：
 ```
-GET http://127.0.0.1:8001/status
+GET http://127.0.0.1:58001/status
 ```
 
 ## 🛡️ 安全特性
@@ -182,7 +182,7 @@ GET http://127.0.0.1:8001/status
 
 #### "端口已被占用"
 - 在设置中更改端口号
-- 终止占用端口的进程：`lsof -ti:8001 | xargs kill`
+- 终止占用端口的进程：`lsof -ti:58001 | xargs kill`
 
 #### "权限被拒绝"
 - 确保 VS Code 有适当的权限

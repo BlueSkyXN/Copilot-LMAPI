@@ -7,7 +7,7 @@
  * 访问 Copilot 模型。
  *
  * 在架构中的位置:
- *   Client (OpenAI SDK) -> HTTP :8001 -> CopilotServer -> RequestHandler -> vscode.lm API -> Response
+ *   Client (OpenAI SDK) -> HTTP :58001 -> CopilotServer -> RequestHandler -> vscode.lm API -> Response
  *
  * CopilotServer 作为请求的第一个接收者，负责网络层的所有横切关注点（速率限制、认证、
  * CORS、超时），然后将业务逻辑委托给 RequestHandler 处理。

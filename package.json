@@ -49,7 +49,7 @@
       "properties": {
         "copilot-lmapi.port": {
           "type": "number",
-          "default": 8001,
+          "default": 58001,
           "minimum": 1024,
           "maximum": 65535,
           "description": "HTTP server port (requires restart)"

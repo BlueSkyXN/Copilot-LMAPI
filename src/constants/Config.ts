@@ -40,7 +40,7 @@
  *    - 功能说明: 服务器默认配置, 用户可在 VS Code 设置中覆盖
  *    - 类型: { port: number; host: string; autoStart: boolean; enableLogging: boolean;
  *             maxConcurrentRequests: number; requestTimeout: number }
- *    - 关键变量与默认值: port=8001, host='127.0.0.1', autoStart=true,
+ *    - 关键变量与默认值: port=58001, host='127.0.0.1', autoStart=true,
  *      enableLogging=true, maxConcurrentRequests=10, requestTimeout=120
  *
  * 3. LIMITS (const object)
@@ -124,7 +124,7 @@ export const CONFIG_SECTION = 'copilot-lmapi';
 /** 服务器运行的默认配置值, 用户可在 VS Code 设置中覆盖 */
 export const DEFAULT_CONFIG = {
     /** HTTP 服务器监听端口 */
-    port: 8001,
+    port: 58001,
     /** HTTP 服务器绑定地址, 默认仅本地访问 */
     host: '127.0.0.1',
     /** 可选固定 Bearer Token；为空时关闭 HTTP 鉴权 */

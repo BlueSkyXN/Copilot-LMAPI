@@ -35,7 +35,7 @@
  *
  *   4. ServerConfig（接口）
  *      - 功能：服务器配置
- *      - 关键字段：port (number, 默认 8001), host (string, 默认 '127.0.0.1'),
+ *      - 关键字段：port (number, 默认 58001), host (string, 默认 '127.0.0.1'),
  *                 timeout (number, 默认 120s), maxConcurrent (number, 默认 10)
  *
  *   5. ServerState（接口）
@@ -122,7 +122,7 @@ export interface CopilotModelInfo {
  * 控制 HTTP 服务器的监听地址、并发限制和超时等参数。
  */
 export interface ServerConfig {
-    /** HTTP 服务器监听端口（默认 8001） */
+    /** HTTP 服务器监听端口（默认 58001） */
     port: number;
     /** HTTP 服务器监听地址（默认 127.0.0.1） */
     host: string;
