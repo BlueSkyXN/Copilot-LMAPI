@@ -56,9 +56,53 @@ Communication involves "text- and prompt-tsx-parts." Information is "passed alon
 - Properties: `family`, `id`, `maxInputTokens`, `name`, `vendor`, `version`.
 
 #### `LanguageModelChatMessage`
-- `static User(content: string | Array<...>, name?: string): LanguageModelChatMessage`
-- `static Assistant(content: string | Array<...>, name?: string): LanguageModelChatMessage`
+- `static User(content: string | Array<LanguageModelInputPart>, name?: string): LanguageModelChatMessage`
+- `static Assistant(content: string | Array<LanguageModelInputPart>, name?: string): LanguageModelChatMessage`
+- `content` 属性类型为 `Array<LanguageModelInputPart>`，即 `LanguageModelTextPart | LanguageModelToolResultPart | LanguageModelToolCallPart | LanguageModelDataPart` 的联合类型。
+
+#### `LanguageModelDataPart` (稳定 — @types/vscode@1.110.0+)
+- 用于在消息中传递结构化数据（图片、JSON、文本文件等）。
+- 工厂方法:
+  - `static image(data: Uint8Array, mimeType: string): LanguageModelDataPart` — 从原始字节创建图片数据部分
+  - `static json(value: unknown, mimeType?: string): LanguageModelDataPart` — 创建 JSON 数据部分
+  - `static text(value: string, mimeType: string): LanguageModelDataPart` — 创建文本数据部分
+- 属性: `data: Uint8Array`, `mimeType: string`
+
+#### 类型别名 (新增 — @types/vscode@1.110.0+)
+- **`LanguageModelInputPart`**: `LanguageModelTextPart | LanguageModelToolResultPart | LanguageModelToolCallPart | LanguageModelDataPart` — 可作为消息输入内容的所有 part 类型联合
+- **`LanguageModelResponsePart`**: `LanguageModelTextPart | LanguageModelToolCallPart | LanguageModelDataPart` — 流式响应中可能返回的所有 part 类型联合（现在包含 `DataPart`）
+
+#### `LanguageModelChatResponse`
+- `stream` 异步迭代器现在产出 `LanguageModelResponsePart`（即 `LanguageModelTextPart | LanguageModelToolCallPart | LanguageModelDataPart`），流式响应中可能收到 `DataPart`。
 
 #### `LanguageModelError`
 - Error codes: `Blocked`, `NoPermissions`, `NotFound`.
 - Use `err.code` to determine specific failure causes.
+
+### 模型提供者 API (稳定 — @types/vscode@1.110.0+)
+
+#### `lm.registerLanguageModelChatProvider`
+- Signature: `registerLanguageModelChatProvider(id: string, provider: LanguageModelChatProvider): Disposable`
+- 注册自定义语言模型提供者，使其出现在 VS Code 聊天模型选择列表中。此 API 现已稳定。
+
+#### `LanguageModelChatInformation`
+- 提供者通过此接口声明模型元数据:
+  - `id: string`, `name: string`, `family: string`, `version: string`
+  - `maxInputTokens: number`, `maxOutputTokens: number`
+  - `capabilities: LanguageModelChatCapabilities`
+
+#### `LanguageModelChatCapabilities`
+- `imageInput?: boolean` — 模型是否支持图片输入
+- `toolCalling?: boolean | number` — 模型是否支持工具调用（`number` 表示支持的最大并行工具调用数）
+
+### MCP 服务器 API (新增 — @types/vscode@1.110.0+)
+
+#### `lm.registerMcpServerDefinitionProvider`
+- Signature: `registerMcpServerDefinitionProvider(provider: McpServerDefinitionProvider): Disposable`
+- 注册 MCP (Model Context Protocol) 服务器定义提供者，允许扩展动态提供 MCP 服务器定义。
+
+#### `McpStdioServerDefinition`
+- 通过 stdio 通信的 MCP 服务器定义。属性包括 `command`, `args`, `env`, `cwd` 等。
+
+#### `McpHttpServerDefinition`
+- 通过 HTTP (Streamable HTTP / SSE) 通信的 MCP 服务器定义。属性包括 `uri`, `headers` 等。

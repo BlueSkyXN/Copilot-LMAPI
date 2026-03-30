@@ -30,7 +30,7 @@
       },
       {
         "command": "copilot-lmapi.stop",
-        "title": "Stop LM API Server", 
+        "title": "Stop LM API Server",
         "category": "Copilot-LMAPI"
       },
       {
@@ -96,7 +96,7 @@
           "description": "Model cache refresh interval in milliseconds (default: 5 minutes)"
         },
         "copilot-lmapi.modelHealthCheckInterval": {
-          "type": "number", 
+          "type": "number",
           "default": 600000,
           "minimum": 60000,
           "maximum": 3600000,
@@ -136,13 +136,13 @@
     "package": "vsce package"
   },
   "devDependencies": {
-    "@types/vscode": "^1.92.0",
     "@types/node": "18.x",
+    "@types/vscode": "^1.110.0",
     "@typescript-eslint/eslint-plugin": "^6.4.1",
     "@typescript-eslint/parser": "^6.4.1",
-  "eslint": "^8.47.0",
-  "typescript": "~5.3.3",
-    "@vscode/vsce": "^2.15.0"
+    "@vscode/vsce": "^2.15.0",
+    "eslint": "^8.47.0",
+    "typescript": "~5.3.3"
   },
   "repository": {
     "type": "git",

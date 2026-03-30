@@ -62,14 +62,17 @@
  *   5. convertMultimodalMessage(message: EnhancedMessage): Promise<vscode.LanguageModelChatMessage>
  *      - 功能：转换多模态消息（支持原生 DataPart 图片传输 + 文本描述降级）
  *
- *   5a. DataPartCtor (private static getter)
- *      - 功能：运行时检测 LanguageModelDataPart 是否可用（缓存结果）
+ *   5a. DataPartAvailable (private static getter)
+ *      - 功能：运行时检测 LanguageModelDataPart 是否可用（缓存结果，@types/vscode@1.110.0 已稳定）
  *
  *   5b. ThinkingPartCtor (private static getter)
- *      - 功能：运行时检测 LanguageModelThinkingPart 是否可用（缓存结果）
+ *      - 功能：运行时检测 LanguageModelThinkingPart 是否可用（缓存结果，仍为 proposed API）
  *
  *   5c. getThinkingContent(chunk: unknown): string | null
  *      - 功能：检查流式 chunk 是否为 ThinkingPart 并提取文本
+ *
+ *   5d. isDataPart(chunk: unknown): boolean
+ *      - 功能：安全检测流式 chunk 是否为 DataPart（instanceof + 鸭子类型回退）
  *
  *   6. processImageContent(imageUrl: string): Promise<{description: string, data?: any} | null>
  *      - 功能：处理图片内容（文本描述降级路径）
@@ -215,46 +218,48 @@ interface StreamExtractionOptions {
  */
 export class Converter {
 
-    // LanguageModelDataPart 运行时检测缓存
-    // 该类在 @types/vscode 中尚未声明，但 VS Code 运行时已无条件导出
-    private static _dataPartCtor: ((new (data: Uint8Array, mimeType: string) => any) | null) | undefined = undefined;
+    // LanguageModelDataPart 运行时可用性缓存
+    // @types/vscode@1.110.0 已包含稳定类型声明；仍保留运行时检测以兼容 engines.vscode ^1.92.0
+    private static _dataPartAvailable: boolean | undefined = undefined;
 
     // LanguageModelThinkingPart 运行时检测缓存
+    // 注意：ThinkingPart 仍为 proposed API，尚未进入 @types/vscode 稳定声明
     private static _thinkingPartCtor: (Function | null) | undefined = undefined;
 
     /**
      * 运行时检测 LanguageModelDataPart 是否可用
      *
-     * VS Code 在 extHost.api.impl.ts 中无条件导出 LanguageModelDataPart（无 proposedApi 门控），
-     * 但 @types/vscode 尚未包含其类型声明。通过 `(vscode as any).LanguageModelDataPart` 访问，
-     * 结果缓存在静态字段中避免重复检测。
+     * @types/vscode@1.110.0 已包含 LanguageModelDataPart 的稳定类型声明，
+     * 可直接通过 vscode.LanguageModelDataPart 访问。但由于 engines.vscode 仍为 ^1.92.0，
+     * 老版本 VS Code 运行时可能尚未导出该类，因此保留运行时可用性检测作为降级保护。
      */
-    private static get DataPartCtor(): (new (data: Uint8Array, mimeType: string) => any) | null {
-        if (this._dataPartCtor === undefined) {
+    private static get DataPartAvailable(): boolean {
+        if (this._dataPartAvailable === undefined) {
             try {
-                const ctor = (vscode as any).LanguageModelDataPart;
-                this._dataPartCtor = (typeof ctor === 'function') ? ctor : null;
+                this._dataPartAvailable = typeof vscode.LanguageModelDataPart === 'function';
             } catch {
-                this._dataPartCtor = null;
+                this._dataPartAvailable = false;
             }
-            if (this._dataPartCtor) {
+            if (this._dataPartAvailable) {
                 logger.info('LanguageModelDataPart available at runtime — native image transport enabled');
             } else {
                 logger.info('LanguageModelDataPart not available — images will be sent as text descriptions');
             }
         }
-        return this._dataPartCtor as (new (data: Uint8Array, mimeType: string) => any) | null;
+        return this._dataPartAvailable;
     }
 
     /**
      * 运行时检测 LanguageModelThinkingPart 是否可用
      *
-     * 同 DataPart，ThinkingPart 也在 extHost.api.impl.ts 中无条件导出。
+     * ThinkingPart 仍为 proposed API（未进入 @types/vscode 稳定声明），
+     * 必须通过 (vscode as any) 进行运行时检测。
      * 用于 instanceof 检查以识别流式响应中的思考/推理内容。
      */
     private static get ThinkingPartCtor(): Function | null {
         if (this._thinkingPartCtor === undefined) {
             try {
+                // ThinkingPart 仍为 proposed API，需通过 (vscode as any) 访问
                 const ctor = (vscode as any).LanguageModelThinkingPart;
                 this._thinkingPartCtor = (typeof ctor === 'function') ? ctor : null;
             } catch {
@@ -283,6 +288,29 @@ export class Converter {
         if (typeof value === 'string') { return value; }
         if (Array.isArray(value)) { return value.join(''); }
         return null;
+    }
+
+    /**
+     * 检查给定的流式 chunk 是否为 LanguageModelDataPart 实例
+     *
+     * 优先使用 instanceof 检测（需 DataPart 在运行时可用），
+     * 回退到鸭子类型检测（mimeType + data 属性），确保在老版本 VS Code 中也能安全识别。
+     *
+     * @param chunk - 流式响应中的一个 part
+     * @returns 是否为 DataPart（instanceof 或鸭子类型匹配）
+     */
+    private static isDataPart(chunk: unknown): boolean {
+        if (!chunk || typeof chunk !== 'object') { return false; }
+        // 优先：stable instanceof（vscode 1.110+）
+        if (this.DataPartAvailable) {
+            try {
+                if (chunk instanceof vscode.LanguageModelDataPart) { return true; }
+            } catch {
+                // instanceof 失败（极端情况）—— 回退到鸭子类型
+            }
+        }
+        // 回退：鸭子类型检测
+        return 'mimeType' in chunk && 'data' in chunk;
     }
     
     /**
@@ -484,9 +512,8 @@ export class Converter {
             return null;
         }
 
-        const DataPartCtor = this.DataPartCtor;
-        // 类型放宽为 any[] 因为 LanguageModelDataPart 不在 @types/vscode 声明中
-        const contentParts: any[] = [];
+        const dataPartAvailable = this.DataPartAvailable;
+        const contentParts: Array<vscode.LanguageModelTextPart | vscode.LanguageModelDataPart> = [];
         let textBuffer = this.formatRolePrefix(message.role);
         
         for (const part of message.content) {
@@ -497,7 +524,7 @@ export class Converter {
                 const url = part.image_url.url;
 
                 // 尝试原生 DataPart 传输（仅 base64 data URI）
-                if (DataPartCtor && url.startsWith('data:image/')) {
+                if (dataPartAvailable && url.startsWith('data:image/')) {
                     try {
                         const commaIdx = url.indexOf(',');
                         if (commaIdx === -1) { throw new Error('Invalid data URI: no comma separator'); }
@@ -514,7 +541,8 @@ export class Converter {
                             contentParts.push(new vscode.LanguageModelTextPart(textBuffer));
                             textBuffer = '';
                         }
-                        contentParts.push(new DataPartCtor(new Uint8Array(binaryData), mimeType));
+                        // 使用稳定的静态工厂方法创建图片 DataPart
+                        contentParts.push(vscode.LanguageModelDataPart.image(new Uint8Array(binaryData), mimeType));
                         logger.debug(`Native image part: ${mimeType}, ${binaryData.length} bytes`);
                         continue;
                     } catch (error) {
@@ -1066,9 +1094,9 @@ export class Converter {
                 notes: [
                     'Model metadata is derived from live VS Code LM API objects and runtime observations only.',
                     'Tool and vision flags are advisory hints only; the bridge still attempts requests and lets the runtime/provider decide.',
-                    'Stable selectChatModels exposes id/vendor/family/version/maxInputTokens. Capabilities/thinking parts currently live behind newer or proposed VS Code LM API surfaces.',
+                    'Stable selectChatModels exposes id/vendor/family/version/maxInputTokens. LanguageModelChatCapabilities (imageInput/toolCalling) is stable since @types/vscode@1.110.0 on the provider side; consumer LanguageModelChat objects may expose these at runtime.',
                     'There is no stable LM API field in this build for model-specific reasoning effort or thinking budget controls; use request-side x_lmapi.model_options only as provider-specific passthrough.',
-                    'Bridge supports native image transport via runtime-detected LanguageModelDataPart when available (base64 data URIs only); falls back to descriptive text context otherwise.'
+                    'Bridge supports native image transport via LanguageModelDataPart (stable since @types/vscode@1.110.0) when available (base64 data URIs only); falls back to descriptive text context otherwise.'
                 ]
             }
         }));
@@ -1094,7 +1122,7 @@ export class Converter {
      */
     private static getResponseChunks(
         response: vscode.LanguageModelChatResponse
-    ): AsyncIterable<vscode.LanguageModelTextPart | vscode.LanguageModelToolCallPart | string | unknown> {
+    ): AsyncIterable<vscode.LanguageModelTextPart | vscode.LanguageModelToolCallPart | vscode.LanguageModelDataPart | string | unknown> {
         // 类型断言以兼容不同版本的 VS Code LM API
         const responseWithFallback = response as vscode.LanguageModelChatResponse & {
             stream?: AsyncIterable<unknown>;
@@ -1191,8 +1219,13 @@ export class Converter {
                     }];
                     completionTextLength += (toolCall.function.name?.length || 0) + (toolCall.function.arguments?.length || 0);
                     emittedToolCallIndex++;
+                } else if (this.isDataPart(chunk)) {
+                    // LanguageModelDataPart 现已在 stream 类型联合中声明（@types/vscode@1.110.0）
+                    // 流式响应中的 DataPart 无法直接映射到 OpenAI SSE delta，记录并跳过
+                    const dp = chunk as { mimeType?: string; data?: Uint8Array };
+                    logger.debug(`Stream DataPart received: ${dp.mimeType ?? 'unknown'}, ${dp.data?.length ?? 0} bytes — skipped (no OpenAI SSE mapping)`);
                 } else {
-                    // ThinkingPart 运行时检测（不在 @types/vscode 中）
+                    // ThinkingPart 运行时检测（仍为 proposed API，不在 @types/vscode 稳定声明中）
                     const thinkingText = this.getThinkingContent(chunk);
                     if (thinkingText) {
                         delta.reasoning_content = thinkingText;
@@ -1470,7 +1503,8 @@ export class Converter {
                     return (part as { value: string }).value;
                 }
                 // DataPart (图片) 按 85 token 估算（OpenAI low-detail tile 基准）
-                if ('mimeType' in part && 'data' in part) {
+                // LanguageModelDataPart 已在 @types/vscode@1.110.0 稳定；isDataPart 内部安全处理 instanceof + 鸭子类型
+                if (this.isDataPart(part)) {
                     return ' '.repeat(340);
                 }
                 return '';

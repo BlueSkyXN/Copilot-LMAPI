@@ -118,9 +118,21 @@ export interface ModelCapabilities {
     
     // -- 功能支持检测 --
 
-    /** 是否支持视觉/图像输入 */
+    /**
+     * 是否支持视觉/图像输入
+     *
+     * 对应 @types/vscode 1.110+ 中 LanguageModelChatCapabilities.imageInput。
+     * 消费端 LanguageModelChat 无此字段，由运行时探测 capabilities.imageInput
+     * 或旧版 capabilities.supportsImageToText 推断。
+     */
     supportsVision: boolean;
-    /** 是否支持工具/函数调用（OpenAI tools/functions 格式） */
+    /**
+     * 是否支持工具/函数调用（OpenAI tools/functions 格式）
+     *
+     * 对应 @types/vscode 1.110+ 中 LanguageModelChatCapabilities.toolCalling。
+     * 消费端 LanguageModelChat 无此字段，由运行时探测 capabilities.toolCalling
+     * 或旧版 capabilities.supportsToolCalling 推断。
+     */
     supportsTools: boolean;
     /** 是否支持流式输出（VS Code 模型默认为 true） */
     supportsStreaming: boolean;

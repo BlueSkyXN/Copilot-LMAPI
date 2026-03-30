@@ -126,10 +126,27 @@ import {
 } from '../types/ModelCapabilities';
 import { logger } from '../utils/Logger';
 
+/**
+ * 运行时模型能力扩展接口
+ *
+ * VS Code 运行时可能在 LanguageModelChat 对象上暴露 `capabilities` 属性，
+ * 但其字段名因 API 版本不同而变化：
+ *   - 旧版 proposed API: supportsToolCalling / supportsImageToText
+ *   - 新版 stable API (1.110+): toolCalling / imageInput
+ *     （对应 @types/vscode 中的 LanguageModelChatCapabilities）
+ *
+ * 本接口同时兼容两种命名，analyzeModelCapabilities 中取并集判断。
+ */
 interface RuntimeLanguageModelCapabilities {
+    // -- 旧版 proposed 字段 --
     supportsToolCalling?: boolean;
     supportsImageToText?: boolean;
     editToolsHint?: readonly string[];
+    // -- 新版 stable 字段 (对应 vscode.LanguageModelChatCapabilities) --
+    /** @see vscode.LanguageModelChatCapabilities.toolCalling */
+    toolCalling?: boolean | number;
+    /** @see vscode.LanguageModelChatCapabilities.imageInput */
+    imageInput?: boolean;
 }
 
 type RuntimeLanguageModelChat = vscode.LanguageModelChat & {
@@ -372,8 +389,17 @@ export class ModelDiscoveryService {
         const existing = this.modelCache.get(vsCodeModel.id);
         const canSendRequest = this.accessInformation?.canSendRequest(vsCodeModel);
         const runtimeCapabilities = (vsCodeModel as RuntimeLanguageModelChat).capabilities;
-        const proposedToolState = this.toSupportState(runtimeCapabilities?.supportsToolCalling);
-        const proposedVisionState = this.toSupportState(runtimeCapabilities?.supportsImageToText);
+        // 兼容新旧两套运行时能力字段名：
+        //   旧版 proposed: supportsToolCalling / supportsImageToText
+        //   新版 stable (1.110+): toolCalling / imageInput  (对应 LanguageModelChatCapabilities)
+        const rawToolCalling = runtimeCapabilities?.supportsToolCalling
+            ?? (runtimeCapabilities?.toolCalling !== undefined
+                ? Boolean(runtimeCapabilities.toolCalling)
+                : undefined);
+        const rawImageInput = runtimeCapabilities?.supportsImageToText
+            ?? runtimeCapabilities?.imageInput;
+        const proposedToolState = this.toSupportState(rawToolCalling);
+        const proposedVisionState = this.toSupportState(rawImageInput);
         const lmapiToolState = proposedToolState !== 'unknown' ? proposedToolState : undefined;
         const observedToolState = existing?.toolSupportSource === 'lmapi-observed-request'
             ? existing.toolSupportState
@@ -384,13 +410,13 @@ export class ModelDiscoveryService {
             : lmapiToolState
                 ? 'lmapi-proposed-capabilities'
                 : existing?.toolSupportSource ?? 'not-exposed-by-lmapi';
-        // 运行时检测 LanguageModelDataPart 是否可用（无 proposedApi 门控，VS Code 已无条件导出）
+        // 运行时检测 LanguageModelDataPart 是否可用
+        // @types/vscode 1.110+ 已将其列为 stable，但 engines.vscode ^1.92.0 仍需运行时兜底
         let canBridgeTransportNativeImages = false;
         try {
-            const ctor = (vscode as any).LanguageModelDataPart;
-            canBridgeTransportNativeImages = typeof ctor === 'function';
+            canBridgeTransportNativeImages = typeof vscode.LanguageModelDataPart === 'function';
         } catch {
-            // 保持 false
+            // 保持 false — 老版本 VS Code 可能未导出此符号
         }
         const effectiveVisionState = proposedVisionState === 'supported' && !canBridgeTransportNativeImages
             ? 'unknown'
@@ -449,6 +475,8 @@ export class ModelDiscoveryService {
             runtimeCapabilities: {
                 supportsToolCalling: runtimeCapabilities?.supportsToolCalling,
                 supportsImageToText: runtimeCapabilities?.supportsImageToText,
+                toolCalling: runtimeCapabilities?.toolCalling,
+                imageInput: runtimeCapabilities?.imageInput,
                 editToolsHint: runtimeCapabilities?.editToolsHint
             }
         });

@@ -95,8 +95,8 @@ POST /v1/chat/completions
 - 存在和频率惩罚
 
 当前说明：
-- `image_url` 请求体结构仍可被 bridge 接收；当前实现不会因为模型提示缺少 vision 而拦截请求，而是统一退化为文本描述上下文后继续尝试调用模型。
-- 当前版本仍未把 `image_url` 映射为原生 image part，因此 `/v1/models` 只有在未来接上真实 image part 传输后才会把模型声明为真正的 vision / multimodal。
+- `image_url` 请求体结构可被 bridge 接收；当 `LanguageModelDataPart` 在运行时可用（`@types/vscode@1.110.0`+ 稳定 API）时，base64 data URI 图片会通过 `LanguageModelDataPart.image()` 原生传输给模型；不可用时退化为文本描述上下文。
+- 对于 HTTP/HTTPS 外部图片 URL，当前版本不做远程获取，仅记录域名信息作为文本上下文。
 - bridge 会把一组保守的生成控制项（当前包括 `stop` / `temperature` / `max_tokens` / `presence_penalty` / `frequency_penalty`）整理为 VS Code LM API `modelOptions`；`x_lmapi.model_options` 仅能补充这一受限子集，未知键会被过滤，若 runtime 仍拒绝这些 `modelOptions`，bridge 会在响应头发送前自动去掉它们重试一次。
 
 工具调用兼容细节：
@@ -125,10 +125,10 @@ GET /v1/models
 - 模型能力来源为 **VS Code LM API `selectChatModels()` 直出字段 + 当前扩展的运行时观测**，不再使用内置官方网页模型 metadata registry。
 - `tools` / `vision` 能力在当前 bridge 中仅作为提示信息，不作为请求前硬拦截条件；真实请求始终优先尝试，再由 runtime / provider 给出成功或失败。
 - 对同一 `id` 的多 vendor 变体会先去重，再输出到 `/v1/models` 和内部模型池，避免重复项放大统计结果。
-- 本仓库当前依赖的是 VS Code `^1.92.0` 稳定类型面：稳定面包含 `tools` / `toolMode` / `modelOptions`，但不包含稳定的消费者侧模型 `capabilities`、推理强度或 thinking budget 控制字段。
-- 官方仓库中存在 proposed `LanguageModelChat.capabilities` 与 `LanguageModelThinkingPart`，但它们不属于本仓库当前稳定类型面；因此 `/v1/models` 中与 reasoning 相关的字段默认保持 `unknown`，除非未来接入了真实 runtime 观测。
+- 本仓库当前依赖的是 VS Code `^1.92.0` 稳定类型面（`@types/vscode@^1.110.0`）：稳定面包含 `tools` / `toolMode` / `modelOptions` / `LanguageModelDataPart`（图片/多模态输入）/ `LanguageModelChatProvider` / `LanguageModelChatCapabilities`（`imageInput` / `toolCalling`），但不包含 `LanguageModelThinkingPart`。
+- 官方仓库中存在 proposed `LanguageModelThinkingPart`，它不属于本仓库当前稳定类型面；因此 `/v1/models` 中与 reasoning 相关的字段默认保持 `unknown`，除非未来接入了真实 runtime 观测。
 
-常见模型包括：gpt-4o, claude-3.5-sonnet, gpt-4.1, claude-sonnet-4, gemini-2.0-flash-001, gemini-2.5-pro, o3-mini, o4-mini
+常见模型包括：gpt-4o, gpt-4.1, gpt-5, gpt-5-mini, claude-3.5-sonnet, claude-sonnet-4, claude-sonnet-4.6, gemini-2.0-flash-001, gemini-2.5-pro, o3-mini, o4-mini
 
 #### 健康检查
 ```
